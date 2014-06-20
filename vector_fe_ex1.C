@@ -374,24 +374,8 @@ Gradient exact_derivative(const Point& p,
  }
 
 
-
-// We now define the matrix assembly function for the
-// Poisson system.  We need to first compute element
-// matrices and right-hand sides, and then take into
-// account the boundary conditions, which will be handled
-// via a penalty method.
-
 void DNHatMatrix(DenseMatrix<Real> & DNhat, const unsigned int & dim, int & phiSize, const std::vector<std::vector<RealTensor> >& dphi, unsigned int & qp) {
 	DNhat.resize(phiSize,dim*dim);
-	DenseMatrix<Real> DN;
-	DN.resize(phiSize/dim, dim);
-	for (unsigned int i = 0; i<phiSize/dim; i++) {
-		for (unsigned int j = 0; j<dim; j++) {
-			DN(i,j) = dphi[dim*i][qp](0,j);
-		}
-	}
-//	std::cout<<" Printing DN "<<std::endl;
-//	std::cout<<DN<<std::endl;
 	for (unsigned int ii = 0; ii<phiSize/dim; ii++) {
 		for (unsigned int jj = 0; jj<dim; jj++) {
 			for (unsigned int i = 0; i<dim; i++) {
@@ -399,26 +383,15 @@ void DNHatMatrix(DenseMatrix<Real> & DNhat, const unsigned int & dim, int & phiS
 			}
 		}
 	}
-//	std::cout<<" Printing DNhat "<<std::endl;
-//	std::cout<<DNhat<<std::endl;
 }
 
 void NHatMatrix(DenseMatrix<Real> & Nhat, const unsigned int & dim, int & phiSize, const std::vector<std::vector<RealGradient> >& phi, unsigned int & qp) {
 	Nhat.resize(phiSize,dim);
-//	DenseVector<Real> N;
-//	N.resize(phiSize/dim);
-//	for (unsigned int i = 0; i<phiSize/dim; i++) {
-//		N(i) = phi[dim*i][qp](0);
-//	}
-//	std::cout<<" Printing N "<<std::endl;
-//	std::cout<<N<<std::endl;
 	for (unsigned int ii = 0; ii<phiSize/dim; ii++) {
 		for (unsigned int i = 0; i<dim; i++) {
 			Nhat(dim*ii + i,i) = phi[dim*ii][qp](0);
 		}
 	}
-//	std::cout<<" Printing Nhat "<<std::endl;
-//	std::cout<<Nhat<<std::endl;
 }
 
 void EvalElasticity(DenseMatrix<Real> & CMat, const std::vector<Point>& q_point, const unsigned int & dim, unsigned int & qp) {
@@ -428,7 +401,7 @@ void EvalElasticity(DenseMatrix<Real> & CMat, const std::vector<Point>& q_point,
 	// This can be optimized, and it should be!
 	Real lambda, mu;
     const Real x = q_point[qp](0);
-    if ( x <= 0.25){
+    if ( x <= 0.5){
     	lambda = 5;
     	mu = 2;
     	// FIXME Now it's the fourth order identity tensor because of the manufactured solution
@@ -447,11 +420,6 @@ void EvalElasticity(DenseMatrix<Real> & CMat, const std::vector<Point>& q_point,
     	  CMat(1,1) = 1;
     	  CMat(2,2) = 1;
     	  CMat(3,3) = 1;
-//    	  CMat(4,4) = 1;
-//    	  CMat(5,5) = 1;
-//    	  CMat(6,6) = 1;
-//    	  CMat(7,7) = 1;
-//    	  CMat(8,8) = 1;
     	}
     }
     else {
@@ -472,15 +440,15 @@ void EvalElasticity(DenseMatrix<Real> & CMat, const std::vector<Point>& q_point,
     	  CMat(1,1) = 1;
     	  CMat(2,2) = 1;
     	  CMat(3,3) = 1;
-//    	  CMat(4,4) = 1;
-//    	  CMat(5,5) = 1;
-//    	  CMat(6,6) = 1;
-//    	  CMat(7,7) = 1;
-//    	  CMat(8,8) = 1;
     	}
     }
 }
 
+// We now define the matrix assembly function for the
+// Poisson system.  We need to first compute element
+// matrices and right-hand sides, and then take into
+// account the boundary conditions, which will be handled
+// via a penalty method.
 
 void assemble_poisson(EquationSystems& es,
                       const std::string& system_name)

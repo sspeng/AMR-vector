@@ -81,11 +81,14 @@ using namespace libMesh;
 // other objects we might need.
 void assemble_poisson(EquationSystems& es,
                       const std::string& system_name);
+
+//Functions to assemble the matrices DNHat and Nhat. These matrices contain the shape function information. They are built using the kronecker product of either the shape
+// function N or its derivatives DN and the identity matrix
 void DNHatMatrix(DenseMatrix<Real> & DNhat, const unsigned int & dim, int & phiSize, const std::vector<std::vector<RealTensor> > & dphi, unsigned int & qp);
 
 void NHatMatrix(DenseMatrix<Real> & Nhat, const unsigned int & dim, int & phiSize, const std::vector<std::vector<RealGradient> >& phi, unsigned int & qp);
 
-
+// Function to evaluate the entire constitutive response matrix. It is a matrix of 4-by-4 for 2-D only now.
 void EvalElasticity(DenseMatrix<Real> & CMat, const std::vector<Point>& q_point, const unsigned int & dim, unsigned int & qp);
 
 

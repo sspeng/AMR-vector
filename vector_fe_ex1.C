@@ -348,7 +348,7 @@ Number exact_solution(const Point& p,
     solution(0) = 256.*(x-x*x)*(x-x*x)*(y-y*y)*(y-y*y);
     solution(1) = 256.*(x-x*x)*(x-x*x)*(y-y*y)*(y-y*y);
 
-    return 25600.*(x-x*x)*(x-x*x)*(y-y*y)*(y-y*y);
+    return 256.*(x-x*x)*(x-x*x)*(y-y*y)*(y-y*y);
   }
 
 Gradient exact_derivative(const Point& p,

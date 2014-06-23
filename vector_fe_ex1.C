@@ -489,18 +489,18 @@ void assemble_poisson(EquationSystems& es,
   // Tell the finite element object to use our quadrature rule.
   fe->attach_quadrature_rule (&qrule);
 
-  // Declare a special finite element object for
-  // boundary integration.
-  AutoPtr<FEVectorBase> fe_face (FEVectorBase::build(dim, fe_type));
-
-  // Boundary integration requires one quadraure rule,
-  // with dimensionality one less than the dimensionality
-  // of the element.
-  QGauss qface(dim-1, FIFTH);
-
-  // Tell the finite element object to use our
-  // quadrature rule.
-  fe_face->attach_quadrature_rule (&qface);
+//  // Declare a special finite element object for
+//  // boundary integration.
+//  AutoPtr<FEVectorBase> fe_face (FEVectorBase::build(dim, fe_type));
+//
+//  // Boundary integration requires one quadraure rule,
+//  // with dimensionality one less than the dimensionality
+//  // of the element.
+//  QGauss qface(dim-1, FIFTH);
+//
+//  // Tell the finite element object to use our
+//  // quadrature rule.
+//  fe_face->attach_quadrature_rule (&qface);
 
   // Here we define some references to cell-specific data that
   // will be used to assemble the linear system.
@@ -612,19 +612,6 @@ void assemble_poisson(EquationSystems& es,
     	  DNhat *= JxW[qp];
     	  Ke += DNhat;
     	  t = clock() - t;
-//    	  std::cout<<std::fixed<<std::setprecision(20)<<10000000*((float)t)/CLOCKS_PER_SEC<<std::endl;
-          // Now we will build the element matrix.  This involves
-          // a double loop to integrate the test funcions (i) against
-          // the trial functions (j).
-//		  t = clock();    	  //FIXME We are calculating the element stifness matrix twice...
-//    	  t = clock() - t;
-//    	  std::cout <<std::fixed<<std::setprecision(20)<<10000000*((float)t)/CLOCKS_PER_SEC<<std::endl;
-//    	  std::cout<<"Ke"<<std::endl;
-//          std::cout<<Ke<<std::endl;
-//    	  std::cout<<"KeAlternativa"<<std::endl;
-//          std::cout<<KeAlternativa<<std::endl;
-//          bool igual = Ke == KeAlternativa;
-//          std::cout<<igual<<std::endl;
           // This is the end of the matrix summation loop
           // Now we build the element right-hand-side contribution.
           // This involves a single loop in which we integrate the
@@ -649,18 +636,18 @@ void assemble_poisson(EquationSystems& es,
             // Since the value of the forcing function depends only
             // on the location of the quadrature point (q_point[qp])
             // we will compute it here, outside of the i-loop
-            const Number fx = -(exact_solution(Point(x,y-eps,0),_parameters,dummy,dummy) +
-                              exact_solution(Point(x,y+eps,0),_parameters,dummy,dummy) +
-                              exact_solution(Point(x-eps,y,0),_parameters,dummy,dummy) +
-                              exact_solution(Point(x+eps,y,0),_parameters,dummy,dummy) -
-                              4.*exact_solution(Point(x,y,0),_parameters,dummy,dummy))/eps/eps;
-
-            const Number fy = -(exact_solution(Point(x,y-eps,0),_parameters,dummy,dummy) +
-                    exact_solution(Point(x,y+eps,0),_parameters,dummy,dummy) +
-                    exact_solution(Point(x-eps,y,0),_parameters,dummy,dummy) +
-                    exact_solution(Point(x+eps,y,0),_parameters,dummy,dummy) -
-                    4.*exact_solution(Point(x,y,0),_parameters,dummy,dummy))/eps/eps;
-            f(0) = fx; f(1) = fy;
+//            const Number fx = -(exact_solution(Point(x,y-eps,0),_parameters,dummy,dummy) +
+//                              exact_solution(Point(x,y+eps,0),_parameters,dummy,dummy) +
+//                              exact_solution(Point(x-eps,y,0),_parameters,dummy,dummy) +
+//                              exact_solution(Point(x+eps,y,0),_parameters,dummy,dummy) -
+//                              4.*exact_solution(Point(x,y,0),_parameters,dummy,dummy))/eps/eps;
+//
+//            const Number fy = -(exact_solution(Point(x,y-eps,0),_parameters,dummy,dummy) +
+//                    exact_solution(Point(x,y+eps,0),_parameters,dummy,dummy) +
+//                    exact_solution(Point(x-eps,y,0),_parameters,dummy,dummy) +
+//                    exact_solution(Point(x+eps,y,0),_parameters,dummy,dummy) -
+//                    4.*exact_solution(Point(x,y,0),_parameters,dummy,dummy))/eps/eps;
+//            f(0) = fx; f(1) = fy;
 
             //FIXME Temporal body force
             f(0) = 0;
@@ -674,90 +661,6 @@ void assemble_poisson(EquationSystems& es,
 
           }
         }
-
-      // We have now reached the end of the RHS summation,
-      // and the end of quadrature point loop, so
-      // the interior element integration has
-      // been completed.  However, we have not yet addressed
-      // boundary conditions.  For this example we will only
-      // consider simple Dirichlet boundary conditions.
-      //
-      // There are several ways Dirichlet boundary conditions
-      // can be imposed.  A simple approach, which works for
-      // interpolary bases like the standard Lagrange polynomials,
-      // is to assign function values to the
-      // degrees of freedom living on the domain boundary. This
-      // works well for interpolary bases, but is more difficult
-      // when non-interpolary (e.g Legendre or Hierarchic) bases
-      // are used.
-      //
-      // Dirichlet boundary conditions can also be imposed with a
-      // "penalty" method.  In this case essentially the L2 projection
-      // of the boundary values are added to the matrix. The
-      // projection is multiplied by some large factor so that, in
-      // floating point arithmetic, the existing (smaller) entries
-      // in the matrix and right-hand-side are effectively ignored.
-      //
-      // This amounts to adding a term of the form (in latex notation)
-      //
-      // \frac{1}{\epsilon} \int_{\delta \Omega} \phi_i \phi_j = \frac{1}{\epsilon} \int_{\delta \Omega} u \phi_i
-      //
-      // where
-      //
-      // \frac{1}{\epsilon} is the penalty parameter, defined such that \epsilon << 1
-      {
-
-        // The following loop is over the sides of the element.
-        // If the element has no neighbor on a side then that
-        // side MUST live on a boundary of the domain.
-//        for (unsigned int side=0; side<elem->n_sides(); side++)
-//          if (elem->neighbor(side) == NULL)
-//            {
-//              // The value of the shape functions at the quadrature
-//              // points.
-//              const std::vector<std::vector<RealGradient> >&  phi_face = fe_face->get_phi();
-//
-//              // The Jacobian * Quadrature Weight at the quadrature
-//              // points on the face.
-//              const std::vector<Real>& JxW_face = fe_face->get_JxW();
-//
-//              // The XYZ locations (in physical space) of the
-//              // quadrature points on the face.  This is where
-//              // we will interpolate the boundary value function.
-//              const std::vector<Point>& qface_point = fe_face->get_xyz();
-//
-//              // Compute the shape function values on the element
-//              // face.
-//              fe_face->reinit(elem, side);
-//
-//              // Loop over the face quadrature points for integration.
-//              for (unsigned int qp=0; qp<qface.n_points(); qp++)
-//                {
-//
-//                  // The location on the boundary of the current
-//                  // face quadrature point.
-//                  const Real xf = qface_point[qp](0);
-//                  const Real yf = qface_point[qp](1);
-//
-//                  // The penalty value.  \frac{1}{\epsilon}
-//                  // in the discussion above.
-//                  const Real penalty = 1.e10;
-//
-//                  // The boundary values.
-//                  const RealGradient f( exact_solution(0, xf, yf),
-//                                        exact_solution(1, xf, yf) );
-//
-//                  // Matrix contribution of the L2 projection.
-//                  for (unsigned int i=0; i<phi_face.size(); i++)
-//                    for (unsigned int j=0; j<phi_face.size(); j++)
-//                      Ke(i,j) += JxW_face[qp]*penalty*phi_face[i][qp]*phi_face[j][qp];
-//
-//                  // Right-hand-side contribution of the L2
-//                  // projection.
-//                  for (unsigned int i=0; i<phi_face.size(); i++)
-//                    Fe(i) += JxW_face[qp]*penalty*f*phi_face[i][qp];
-//                }
-//            }
       }
 
       // We have now finished the quadrature point loop,
@@ -773,7 +676,7 @@ void assemble_poisson(EquationSystems& es,
       // and  NumericVector::add_vector() members do this for us.
       system.matrix->add_matrix (Ke, dof_indices);
       system.rhs->add_vector    (Fe, dof_indices);
-    }
+
 
   // All done!
 }

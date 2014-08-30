@@ -5,7 +5,7 @@ LIBMESH_DIR ?= /usr/local
 
 
 # include the library options determined by configure
-include $(LIBMESH_DIR)/Make.common
+include ./Make.common
 
 target     := ./example-$(METHOD)
 
@@ -37,7 +37,7 @@ all:: $(notdir $(target))
 $(notdir $(target)): $(objects)
 	@echo "Linking "$@"..."
 	@$(libmesh_LIBTOOL) --tag=CXX $(LIBTOOLFLAGS) --mode=link \
-	  $(libmesh_CXX) $(libmesh_CXXFLAGS) $(objects) -o $@ $(libmesh_LIBS) $(libmesh_LDFLAGS) $(EXTERNAL_FLAGS)
+	  $(libmesh_CXX) $(libmesh_CXXFLAGS) $(objects) -o $@ $(libmesh_LIBS) -lnlopt_cxx $(libmesh_LDFLAGS) $(EXTERNAL_FLAGS)
 
 
 # Useful rules.
@@ -89,3 +89,4 @@ gmv:
 	@$(perl) $(LIBMESH_DIR)/contrib/bin/make_dependencies.pl -I. $(foreach i, $(LIBMESH_DIR)/include $(wildcard $(LIBMESH_DIR)/include/*), -I$(i)) "-S\$$(obj-suffix)" $(srcfiles) > .depend
 
 ###############################################################################
+# DO NOT DELETE

@@ -16,22 +16,25 @@
 /* Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 
-// <h1>Vector Finite Element Example 1 - Solving an uncoupled Poisson Problem</h1>
+// <h1>Vector Finite Element Example 1 - Solving an uncoupled Elasticity Problem</h1>
 //
 // This is the first vector FE example program.  It builds on
 // the introduction_ex3 example program by showing how to solve a simple
-// uncoupled Poisson system using vector Lagrange elements.
+// uncoupled TopOpt system using vector Lagrange elements.
 
 // C++ include files that we need
 #include <iostream>
 #include <algorithm>
 #include <math.h>
 #include <time.h>
+#include <utility>
 // Basic include files needed for the mesh functionality.
 #include "libmesh/libmesh.h"
 #include "libmesh/mesh.h"
 #include "libmesh/mesh_generation.h"
+#include "libmesh/mesh_modification.h"
 #include "libmesh/linear_implicit_system.h"
+#include "libmesh/explicit_system.h"
 #include "libmesh/equation_systems.h"
 #include "libmesh/exodusII_io.h"
 #include "libmesh/gmv_io.h"
@@ -56,624 +59,916 @@
 // indexing.
 #include "libmesh/dof_map.h"
 
+#include "libmesh/newton_solver.h"
+#include "libmesh/numeric_vector.h"
+#include "libmesh/steady_solver.h"
+#include "libmesh/system_norm.h"
+
 // Data structures to handle Dirichlet BC applied in the regular way
 #include "libmesh/boundary_info.h"
-#include "libmesh/zero_function.h"
-#include "libmesh/dirichlet_boundaries.h"
+
 
 // AMR Data Structures
 #include "libmesh/error_vector.h"
-#include "libmesh/kelly_error_estimator.h"
+#include "libmesh/kelly_error_estimator_elasticity.h"
 #include "libmesh/mesh_refinement.h"
 #include "libmesh/uniform_refinement_estimator.h"
+#include "libmesh/patch_recovery_error_estimator.h"
+#include "libmesh/patch_recovery_error_estimator_elasticity.h"
+
+// Adjoint Related includes
+#include "libmesh/adjoint_residual_error_estimator.h"
 
 // Exact solution
 #include "libmesh/exact_solution.h"
 
+#include "libmesh/petsc_vector.h"
+
+//#include "solution_function.h"
+//#include "elasticity_exact_solution.h"
+
+// Functions to build the shape function matrices
+#include "libmesh/elasticity_tools.h"
+
+// Sensitivity Calculation related includes
+#include "libmesh/parameter_vector.h"
+#include "libmesh/sensitivity_data.h"
+
+// Local includes
+#include "femparameters.h"
+#include "TopOpt.h"
+
+#include "compliance.h"
+#include "vonmises.h"
+#include "compliance_traction.h"
+
+// Include optimizer
+#include "nlopt.hpp"
+
 // Bring in everything from the libMesh namespace
 using namespace libMesh;
 
-// Function prototype.  This is the function that will assemble
-// the linear system for our Poisson problem.  Note that the
-// function will take the  EquationSystems object and the
-// name of the system we are assembling as input.  From the
-//  EquationSystems object we have access to the  Mesh and
-// other objects we might need.
-void assemble_poisson(EquationSystems& es,
-                      const std::string& system_name);
 
-//Functions to assemble the matrices DNHat and Nhat. These matrices contain the shape function information. They are built using the kronecker product of either the shape
-// function N or its derivatives DN and the identity matrix
-void DNHatMatrix(DenseMatrix<Real> & DNhat, const unsigned int & dim, int & phiSize, const std::vector<std::vector<RealTensor> > & dphi, unsigned int & qp);
+void write_output(EquationSystems &es,
+                  unsigned int a_step, // The adaptive step count
+                  std::string solution_type) // primal or adjoint solve
+{
+#ifdef LIBMESH_HAVE_GMV
+  MeshBase &mesh = es.get_mesh();
 
-void NHatMatrix(DenseMatrix<Real> & Nhat, const unsigned int & dim, int & phiSize, const std::vector<std::vector<RealGradient> >& phi, unsigned int & qp);
+  std::ostringstream file_name_gmv;
+  file_name_gmv << solution_type
+                << ".out.gmv."
+                << std::setw(2)
+                << std::setfill('0')
+                << std::right
+                << a_step;
+
+  GMVIO(mesh).write_equation_systems
+    (file_name_gmv.str(), es);
+
+
+#endif
+}
 
 // Function to evaluate the entire constitutive response matrix. It is a matrix of 4-by-4 for 2-D only now.
-void EvalElasticity(DenseMatrix<Real> & CMat, const std::vector<Point>& q_point, const unsigned int & dim, unsigned int & qp);
+
+void EvalElasticity(DenseMatrix<Real> & CMat) {
+
+	Number _lambda = 200e3;
+	Number _mu = 100e3;
+	CMat(0,0) = _lambda + 2*_mu;
+	CMat(3,3) = _lambda + 2*_mu;
+	CMat(1,1) = _mu;
+	CMat(1,2) = _mu;
+	CMat(2,1) = _mu;
+	CMat(2,2) = _mu;
+	CMat(3,0) = _lambda;
+	CMat(0,3) = _lambda;
+}
+
+std::pair<bool,Tensor> stress_function (const System& ,
+                                       	 const Point& p,
+                                       	 const std::string&,
+                                       	 const dof_id_type & ,
+                                       	 const ParameterVector & ,
+                                       	 const DenseVector<Real> & Du,
+                                       	 const unsigned int & dim ){
+	DenseVector<Real> stress_vec;
+
+	// Create CMat Matrices
+	DenseMatrix<Real> CMat;
+	CMat.resize(dim*dim,dim*dim);
+
+	EvalElasticity(CMat);
+
+	CMat.vector_mult(stress_vec,Du);
+
+	Tensor stress;
+
+	for (unsigned int i=0; i<dim; i++){
+		for (unsigned int j=0; j<dim; j++){
+			stress(i,j) = stress_vec(i+j*dim);
+		}
+	}
+
+	std::pair<bool,Tensor> result(true,stress);
+	return result;
+
+}
 
 
-Number exact_solution(const Point& p,
-                      const Parameters&,   // EquationSystem parameters, not needed
-                      const std::string&,  // sys_name, not needed
-                      const std::string&); // unk_name, not needed);
 
-// Prototype for calculation of the gradient of the exact solution.
-Gradient exact_derivative(const Point& p,
-                          const Parameters&,   // EquationSystems parameters, not needed
-                          const std::string&,  // sys_name, not needed
-                          const std::string&); // unk_name, not needed);
+std::pair<bool,Gradient> bc_function (const System& system,
+                                        const Point& p,
+                                        const std::string& var_name);
 
+// Set the parameters for the nonlinear and linear solvers to be used during the simulation
+
+void set_system_parameters(TopOptSystem &system, FEMParameters &param)
+{
+  // Use analytical jacobians?
+  system.analytic_jacobians() = param.analytic_jacobians;
+
+  // Verify analytic jacobians against numerical ones?
+  system.verify_analytic_jacobians = param.verify_analytic_jacobians;
+
+  // Use the prescribed FE type
+  system.fe_family() = param.fe_family[0];
+  system.fe_order() = param.fe_order[0];
+
+  // More desperate debugging options
+  system.print_solution_norms = param.print_solution_norms;
+  system.print_solutions      = param.print_solutions;
+  system.print_residual_norms = param.print_residual_norms;
+  system.print_residuals      = param.print_residuals;
+  system.print_jacobian_norms = param.print_jacobian_norms;
+  system.print_jacobians      = param.print_jacobians;
+
+  // No transient time solver
+  system.time_solver =
+    AutoPtr<TimeSolver>(new SteadySolver(system));
+
+  // Nonlinear solver options
+  {
+    NewtonSolver *solver = new NewtonSolver(system);
+    system.time_solver->diff_solver() = AutoPtr<DiffSolver>(solver);
+
+    solver->quiet                       = param.solver_quiet;
+    solver->max_nonlinear_iterations    = param.max_nonlinear_iterations;
+    solver->minsteplength               = param.min_step_length;
+    solver->relative_step_tolerance     = param.relative_step_tolerance;
+    solver->relative_residual_tolerance = param.relative_residual_tolerance;
+    solver->require_residual_reduction  = param.require_residual_reduction;
+    solver->linear_tolerance_multiplier = param.linear_tolerance_multiplier;
+    if (system.time_solver->reduce_deltat_on_diffsolver_failure)
+      {
+        solver->continue_after_max_iterations = true;
+        solver->continue_after_backtrack_failure = true;
+      }
+
+    // And the linear solver options
+    solver->max_linear_iterations       = param.max_linear_iterations;
+    solver->initial_linear_tolerance    = param.initial_linear_tolerance;
+    solver->minimum_linear_tolerance    = param.minimum_linear_tolerance;
+  }
+
+  // Set RAMP parameters;
+  system.set_ramp_parameter(param.ramp_parameter);
+  // Set filter parameter
+  system.epsilon = param.filter_parameter;
+  system.pnorm_parameter = param.pnorm_parameter;
+
+  system.volume_fraction_constraint = param.volume_fraction_constraint;
+
+  // Set elasticity constants
+  system.set_elasticity_modules(param.lambda, param.mu);
+}
+
+
+void compute_von_mises(EquationSystems & es){
+
+
+	  const MeshBase& mesh = es.get_mesh();
+
+	  const unsigned int dim = mesh.mesh_dimension();
+
+	  TopOptSystem& system = es.get_system<TopOptSystem>("Elasticity");
+
+	  const unsigned int u_var = system.variable_number ("u");
+
+	  const DofMap& dof_map = system.get_dof_map();
+	  FEType fe_type = dof_map.variable_type(u_var);
+	  AutoPtr<FEVectorBase> fe (FEVectorBase::build(dim, fe_type));
+	  QGauss qrule (dim, fe_type.default_quadrature_order());
+	  fe->attach_quadrature_rule (&qrule);
+
+	  const std::vector<Real>& JxW = fe->get_JxW();
+	  const std::vector<std::vector<RealTensor> >& dphi = fe->get_dphi();
+
+	  // Also, get a reference to the vonmises. DofMap to set the value
+	  ExplicitSystem& vonmises = es.get_system<ExplicitSystem>("VonMises");
+	  const DofMap& stress_dof_map = vonmises.get_dof_map();
+	  unsigned int vonMises_var = vonmises.variable_number ("vonmises");
+
+	  // Storage for the stress dof indices on each element
+	  std::vector<dof_id_type> dof_indices_vonmises;
+
+	  // Same thing for the densities, we need to grab them
+	  ExplicitSystem& densities = es.get_system<ExplicitSystem>("Densities");
+	  const DofMap& densities_dof_map = densities.get_dof_map();
+	  unsigned int density_var = densities.variable_number ("rho");
+
+	  // Storage for the stress dof indices on each element
+	  std::vector<dof_id_type> dof_indices_density;
+	  std::vector<Number> density_value;
+
+	  // To store the stress tensor on each element and the elasticity tensor
+	  DenseMatrix<Number> CMat;
+	  DenseVector<Number> stress_tensor, gradU, stress_deviatoric;
+	  CMat.resize(dim*dim,dim*dim);
+	  gradU.resize(dim*dim);
+	  // Deviatoric stress has to be in three dimensions
+	  stress_deviatoric.resize(3*3);
+
+	  MeshBase::const_element_iterator       el     = mesh.active_local_elements_begin();
+	  const MeshBase::const_element_iterator end_el = mesh.active_local_elements_end();
+
+	  AutoPtr<DiffContext> con = system.build_context();
+	  FEMContext &_femcontext = libmesh_cast_ref<FEMContext&>(*con);
+	  system.init_context(_femcontext);
+
+	  for ( ; el != end_el; ++el)
+	    {
+	      const Elem* elem = *el;
+	      // We need the algebraic data
+	      _femcontext.pre_fe_reinit(system, *el);
+	      // And when asserts are on, we also need the FE so
+	      // we can assert that the mesh data is of the right type.
+	#ifndef NDEBUG
+	      _femcontext.elem_fe_reinit();
+	#endif
+
+	      fe->reinit (elem);
+
+	      // Reset deviatoric stress
+	      stress_deviatoric.zero();
+
+	      // Grab the gradient at qp = 0. It is constant so it doesn't matter
+		  unsigned int qp = 0;
+	      Tensor grad_u;
+	      _femcontext.interior_gradient(u_var,qp,grad_u);
+
+	      // Grab elasticity tensor
+	      system.EvalElasticity(CMat);
+
+	      // Get stress
+	      CMat.vector_mult(stress_tensor, gradU);
+
+	      // Get the value for the density field
+	      densities_dof_map.dof_indices(elem, dof_indices_density, density_var);
+	      // Get the value, stored in density
+	      densities.current_local_solution->get(dof_indices_density, density_value);
+
+	      // Apply the SIMP function
+	      Number density_parameter = density_value[0];
+	      // Apply SIMP function
+	      system.SIMP_function(density_parameter);
+	      stress_tensor *= density_parameter;
+
+	      // Calculate deviatoric stress
+	      Number stress_trace = stress_tensor(0) + stress_tensor(3);
+
+	      // Copy values for the deviatoric stress
+	      stress_deviatoric(0) = stress_tensor(0) - 1.0/3.0 * stress_trace;
+	      stress_deviatoric(1) = stress_tensor(1);
+	      stress_deviatoric(2) = 0;
+	      stress_deviatoric(3) = stress_tensor(2);
+	      stress_deviatoric(5) = stress_tensor(3) - 1.0/3.0 * stress_trace;
+	      stress_deviatoric(6) = 0;
+	      stress_deviatoric(7) = 0;
+	      stress_deviatoric(8) = - 1.0/3.0 * stress_trace;
+
+	      Number VonMises = sqrt(1.5*stress_deviatoric.dot(stress_deviatoric));
+
+	      // Grab the index for the vonmises system and set the new value
+	      stress_dof_map.dof_indices (elem, dof_indices_vonmises, vonMises_var);
+	      dof_id_type dof_index = dof_indices_vonmises[0];
+	      if( (vonmises.solution->first_local_index() <= dof_index) &&
+	          (dof_index < vonmises.solution->last_local_index()) )
+	        {
+	    	  vonmises.solution->set(dof_index, VonMises);
+	        }
+
+	    }
+
+
+	  // Should call close and update when we set vector entries directly
+	  vonmises.solution->close();
+	  vonmises.update();
+
+
+}
+
+#ifdef LIBMESH_ENABLE_AMR
+
+AutoPtr<MeshRefinement> build_mesh_refinement(MeshBase &mesh,
+                                              FEMParameters &param)
+{
+  AutoPtr<MeshRefinement> mesh_refinement(new MeshRefinement(mesh));
+  mesh_refinement->coarsen_by_parents() = true;
+  mesh_refinement->absolute_global_tolerance() = param.global_tolerance;
+  mesh_refinement->nelem_target()      = param.nelem_target;
+  mesh_refinement->refine_fraction()   = param.refine_fraction;
+  mesh_refinement->coarsen_fraction()  = param.coarsen_fraction;
+  mesh_refinement->coarsen_threshold() = param.coarsen_threshold;
+  mesh_refinement->max_h_level()      = param.max_h_level;
+
+
+
+  return mesh_refinement;
+}
+
+#endif // LIBMESH_ENABLE_AMR
+
+
+// This is where we declare the error estimators to be built and used for
+// mesh refinement. The adjoint residual estimator needs two estimators.
+// One for the forward component of the estimate and one for the adjoint
+// weighting factor. Here we use the Patch Recovery indicator to estimate both the
+// forward and adjoint weights. The H1 seminorm component of the error is used
+// as dictated by the weak form the Laplace equation.
+
+AutoPtr<ErrorEstimator> build_error_estimator(FEMParameters &param)
+{
+  AutoPtr<ErrorEstimator> error_estimator;
+
+  if (param.indicator_type == "kelly")
+    {
+      std::cout<<"Using Kelly Error Estimator"<<std::endl;
+
+      error_estimator.reset(new KellyErrorEstimatorElasticity);
+    }
+  else if (param.indicator_type == "adjoint_residual")
+    {
+      std::cout<<"Using Adjoint Residual Error Estimator with Patch Recovery Weights"<<std::endl<<std::endl;
+
+      AdjointResidualErrorEstimator *adjoint_residual_estimator = new AdjointResidualErrorEstimator;
+
+      error_estimator.reset (adjoint_residual_estimator);
+
+      adjoint_residual_estimator->error_plot_suffix = "error.gmv";
+
+      PatchRecoveryErrorEstimatorElasticity *p1 =
+        new PatchRecoveryErrorEstimatorElasticity;
+      p1->attach_elasticity_tensor(&EvalElasticity);
+      adjoint_residual_estimator->primal_error_estimator().reset(p1);
+
+      PatchRecoveryErrorEstimatorElasticity *p2 =
+        new PatchRecoveryErrorEstimatorElasticity;
+      p2->attach_elasticity_tensor(&EvalElasticity);
+      adjoint_residual_estimator->dual_error_estimator().reset(p2);
+
+      adjoint_residual_estimator->primal_error_estimator()->error_norm.set_type(0, H1_SEMINORM);
+
+      adjoint_residual_estimator->dual_error_estimator()->error_norm.set_type(0, H1_SEMINORM);
+    }
+  else
+    libmesh_error_msg("Unknown indicator_type = " << param.indicator_type);
+
+  return error_estimator;
+}
+
+std::pair<bool,Gradient> bc_function (const System&,
+                                        const Point&,
+                                        const std::string& ){
+	Gradient stress_flux(0,-2);
+
+	std::pair<bool,Gradient> result(true,stress_flux);
+	return result;
+}
+
+Gradient body_force (const Point&,
+					const std::string& ){
+
+	Gradient bodyForce(0,-5);
+
+	return bodyForce;
+}
+
+
+
+
+double myfunc(const std::vector<double> & x, std::vector<double> & grad, void * f_data){
+
+	EquationSystems * equation_systems = (EquationSystems *) f_data;
+
+	// Grab mesh
+	const MeshBase & mesh = equation_systems->get_mesh();
+	// Grab systems
+	TopOptSystem & system = equation_systems->get_system<TopOptSystem>("Elasticity");
+	ExplicitSystem & densities = equation_systems->get_system<ExplicitSystem>("Densities");
+
+	// Transfer the value of the variables to the density field
+	system.transfer_densities(densities, mesh, x, true);
+
+	// Create QoIs set and indices
+	QoISet qois;
+	std::vector<unsigned int> qoi_indices;
+	qoi_indices.push_back(0);
+	qois.add_indices(qoi_indices);
+	qois.set_weight(0, 1.0);
+
+	// Solve system
+	system.solve();
+
+	std::cout << "System has: " << equation_systems->n_active_dofs()
+			<< " degrees of freedom."
+			<< std::endl;
+
+	std::cout << "Linear solver converged at step: "
+			<< (system.time_solver->diff_solver())->total_inner_iterations()
+			<< std::endl;
+
+	// Get a pointer to the primal solution vector
+	//NumericVector<Number> &primal_solution = *system.solution;
+
+	SensitivityData sensitivities(qois, system, system.get_parameter_vector());
+
+    // We are about to solve the adjoint system, but before we do this we see the same preconditioner
+    // flag to reuse the preconditioner from the forward solver
+	system.get_linear_solver()->reuse_preconditioner(true);
+
+	// Here we solve the adjoint problem inside the adjoint_qoi_parameter_sensitivity
+	// function, so we have to set the adjoint_already_solved boolean to false
+	system.set_adjoint_already_solved(false);
+
+	// Compute the sensitivities
+	system.adjoint_qoi_parameter_sensitivity(qois, system.get_parameter_vector(), sensitivities);
+
+	// Now that we have solved the adjoint, set the adjoint_already_solved boolean to true, so we dont solve unneccesarily in the error estimator
+	system.set_adjoint_already_solved(true);
+
+	//system.finite_differences_check(&densities,qois,sensitivities,system.get_parameter_vector());
+
+    // Compute the approximate QoIs and write them out to the console
+    system.calculate_qoi(qois);
+    Number QoI_0_computed = system.get_QoI_value(0);
+
+    // Transfer the gradient and apply filter
+    system.filter_gradient(sensitivities.derivative_qoi(0), densities, grad);
+
+    system.contador++;
+
+    std::cout<<"Iteration # "<<system.contador<<" Function value = "<<QoI_0_computed<<std::endl;
+
+    if (system.contador % 20 == 0){
+    	std::cout<<"Printing densities"<<std::endl;
+    	system.densities_filtered.print();
+    }
+
+	return QoI_0_computed;
+}
+
+
+double myvolumeconstraint(const std::vector<double> & x, std::vector<double> & grad, void * f_data){
+
+	EquationSystems * equation_systems = (EquationSystems *) f_data;
+
+	// Grab mesh
+	const MeshBase & mesh = equation_systems->get_mesh();
+	// Grab systems
+	TopOptSystem & system = equation_systems->get_system<TopOptSystem>("Elasticity");
+	ExplicitSystem & densities = equation_systems->get_system<ExplicitSystem>("Densities");
+
+	// Transfer the value of the variables to the density field
+	system.transfer_densities(densities, mesh, x, true);
+
+	std::vector<double> grad_temp;
+	grad_temp.resize(mesh.n_active_elem());
+	Number volume_constraint = system.calculate_volume_constraint(densities, grad_temp);
+
+    // Transfer the gradient and apply filter
+    system.filter_gradient(grad_temp, densities, grad);
+
+
+    return volume_constraint;
+}
 
 int main (int argc, char** argv)
 {
-  // Initialize libraries.
-  LibMeshInit init (argc, argv);
+	// Initialize libraries.
+	LibMeshInit init (argc, argv);
+
+
+	// Skip adaptive examples on a non-adaptive libMesh build
+	#ifndef LIBMESH_ENABLE_AMR
+	libmesh_example_requires(false, "--enable-amr");
+	#endif
+
+	std::cout << "Started " << argv[0] << std::endl;
+
+	// Make sure the general input file exists, and parse it
+	{
+	 std::ifstream i("general.in");
+	 if (!i)
+	   libmesh_error_msg('[' << init.comm().rank() << "] Can't find general.in; exiting early.");
+	}
+	GetPot infile("general.in");
+
+	// Read in parameters from the input file
+	FEMParameters param;
+	param.read(infile);
+
+	// Skip this default-2D example if libMesh was compiled as 1D-only.
+	libmesh_example_requires(2 <= LIBMESH_DIM, "2D support");
+	// Brief message to the user regarding the program name
+	// and command line arguments.
+	std::cout << "Running " << argv[0];
+	// Printing put input options
+	for (int i=1; i<argc; i++)
+	std::cout << " " << argv[i];
+
+	std::cout << std::endl << std::endl;
+
+	// Skip this 2D example if libMesh was compiled as 1D-only.
+	libmesh_example_requires(2 <= LIBMESH_DIM, "2D support");
+
+	std::cout << "Reading in and building the mesh" << std::endl;
+	const unsigned int dim = 2;
+	// Create a mesh, with dimension to be overridden later, on the
+	// default MPI communicator.
+	Mesh mesh(init.comm(),dim);
+
+	// And an object to refine it
+	AutoPtr<MeshRefinement> mesh_refinement =
+	build_mesh_refinement(mesh, param);
+
+	// Read in the mesh
+	mesh.read(param.domainfile.c_str());
+
+	// Add a Dirichlet condition on the top of the third element, i.e., where the L is hanging from.
+//	dof_id_type last_elem = mesh.n_active_elem()-1;
+//	std::cout<<"ult element "<<last_elem<<std::endl;
+//	//mesh.boundary_info->add_side(last_elem,2,0);
+//	std::cout<<"Print mesh info now"<<std::endl;
+	mesh.print_info();
+
+	bool p_norm_objectivefunction = false;
+
+	// Use the MeshTools::Generation mesh generator to create a uniform
+	// 2D grid on the rectangle [0 , 1] x [0 , 0.2].  We instruct the mesh generator
+	// to build a mesh of 50x10 QUAD9 elements.
+	//  MeshTools::Generation::build_square (mesh,
+	//                                              2, 2,
+	//                                              0., 2.,
+	//                                              0., 2.,
+	//                                              QUAD4); // Change the variable approx order if you change the element type
+	//  // Create a vector storing the boundaries id's. In this case, all the boundaries
+	//  const boundary_id_type all_ids[4] = {0,1,2,3};
+	//  std::set<boundary_id_type> boundary_ids( all_ids, all_ids+4 );
+
+	// Create an equation systems object.
+	EquationSystems equation_systems (mesh);
 
 
 
-  // Brief message to the user regarding the program name
-  // and command line arguments.
-  std::cout << "Running " << argv[0];
-  // Printing put input options
-  for (int i=1; i<argc; i++)
-    std::cout << " " << argv[i];
+	// Declare the Elasticity system and its variables.
+	TopOptSystem& system = equation_systems.add_system<TopOptSystem> ("Elasticity");
+	// Build an auxiliary explicit system for the densities
+	ExplicitSystem & densities = equation_systems.add_system<ExplicitSystem> ("Densities");
+	// Add a zeroth order monomial variable that will represent the densities
+	densities.add_variable("rho", CONSTANT, MONOMIAL);
+	// New system to compute the Von Mises stress
+	ExplicitSystem & vonmises_system = equation_systems.add_system<ExplicitSystem> ("VonMises");
+	vonmises_system.add_variable("vonmises", CONSTANT, MONOMIAL);
 
-  std::cout << std::endl << std::endl;
+	// Add objective function in the boundary
+	ComplianceTraction compliancetractionqoi;
+	compliancetractionqoi.attach_flux_bc_function(&bc_function);
+	compliancetractionqoi.assemble_qoi_sides = true;
+	system.attach_qoi(&compliancetractionqoi);
+	// Make sure we get the contributions to the adjoint RHS from the sides
+	system.assemble_qoi_sides = true;
+	// Add a Neumann condition at the right side of the second element,
+	// the other tip of the L. Side ordering starts from zero on the lower side and goes counter clockwise
+	//mesh.boundary_info->add_side(1,1,1);
+	// Attach Traction.
+	system.attach_flux_bc_function(&bc_function);
 
-  // Skip this 2D example if libMesh was compiled as 1D-only.
-  libmesh_example_requires(2 <= LIBMESH_DIM, "2D support");
-
-
-  const unsigned int dim = 2;
-  // Create a mesh, with dimension to be overridden later, on the
-  // default MPI communicator.
-  Mesh mesh(init.comm(),dim);
-
-  // Use the MeshTools::Generation mesh generator to create a uniform
-  // 2D grid on the rectangle [0 , 1] x [0 , 0.2].  We instruct the mesh generator
-  // to build a mesh of 50x10 QUAD9 elements.
-
-  MeshTools::Generation::build_square (mesh,
-                                              50, 10,
-                                              0., 1.,
-                                              0., 0.2,
-                                              QUAD9);
-
-  // Print information about the mesh to the screen.
-  mesh.print_info();
-
-  // Create an equation systems object.
-  EquationSystems equation_systems (mesh);
-
-  // Declare the Poisson system and its variables.
-  // The Poisson system is another example of a steady system.
-  LinearImplicitSystem& system = equation_systems.add_system<LinearImplicitSystem> ("Poisson");
-
-  // Adds the variable "u" to "Poisson".  "u"
-  // will be approximated using second-order approximation
-  // using vector Lagrange elements. Since the mesh is 2-D, "u" will
-  // have two components.
-  unsigned int u_var = system.add_variable("u", SECOND, LAGRANGE_VEC);
-
-  // Give the system a pointer to the matrix assembly
-  // function.  This will be called when needed by the
-  // library.
-  system.attach_assemble_function (assemble_poisson);
-
-  const unsigned int n_components =
-		  system.variable(0).n_components();
-
-  std::cout<<"Number of components for the first and only variable "<<n_components<<std::endl;
+	// Create a mesh refinement object to do the initial uniform refinements
+	// on the coarse grid read in from lshaped.xda
+	MeshRefinement initial_uniform_refinements(mesh);
+	initial_uniform_refinements.uniformly_refine(param.coarserefinements);
 
 
-  // Construct a Dirichlet boundary condition object
-  // We impose a "clamped" boundary condition on the
-  // "left" boundary, i.e. bc_id = 3
-  std::set<boundary_id_type> boundary_ids;
-  boundary_ids.insert(3);
-
-  // Create a vector storing the variable numbers which the BC applies to
-  std::vector<unsigned int> variables(2);
-  variables[0] = u_var;
-
-  // Create a ZeroFunction to initialize dirichlet_bc
-  ZeroFunction<> zf;
-
-  DirichletBoundary dirichlet_bc(boundary_ids,
-                                 variables,
-                                 &zf);
-
-  // We must add the Dirichlet boundary condition _before_
-  // we call equation_systems.init()
-  system.get_dof_map().add_dirichlet_boundary(dirichlet_bc);
 
 
-  // Define the mesh refinement object that takes care of adaptively
-  // refining the mesh.
-  MeshRefinement mesh_refinement(mesh);
-
-  // These parameters determine the proportion of elements that will
-  // be refined and coarsened. Any element within 30% of the maximum
-  // error on any element will be refined, and any element within 30%
-  // of the minimum error on any element might be coarsened
-  mesh_refinement.refine_fraction()  = 0.7;
-  mesh_refinement.coarsen_fraction() = 0.3;
-  // We won't refine any element more than 5 times in total
-  mesh_refinement.max_h_level()      = 5;
+	// Set its parameters
+	set_system_parameters(system, param);
 
 
-  // Initialize the data structures for the equation system.
-  equation_systems.init();
 
-  // Set linear solver max iterations
-  const int max_linear_iterations   = 2500;
-  equation_systems.parameters.set<unsigned int>("linear solver maximum iterations")
-    = max_linear_iterations;
-
-  // Linear solver tolerance.
-  equation_systems.parameters.set<Real>("linear solver tolerance") = 1e-7;
-
-
-  // Refinement parameters
-  const unsigned int max_r_steps = 5; // Refine the mesh 5 times
-
-  // Prints information about the system to the screen.
-  equation_systems.print_info();
-
-//   Construct ExactSolution object and attach solution functions
-//   ExactSolution exact_sol(equation_systems);
-//   exact_sol.attach_exact_value(exact_solution);
-//   exact_sol.attach_exact_deriv(exact_derivative);
-
-  // Solve the system "Poisson".  Note that calling this
-  // member will assemble the linear system and invoke
-  // the default numerical solver.  With PETSc the solver can be
-  // controlled from the command line.  For example,
-  // you can invoke conjugate gradient with:
-  //
-  // ./vector_fe_ex1 -ksp_type cg
-  //
-  // You can also get a nice X-window that monitors the solver
-  // convergence with:
-  //
-  // ./vector_fe_ex1 -ksp_xmonitor
-  //
-  // if you linked against the appropriate X libraries when you
-  // built PETSc.
-
-
-  const std::string indicator_type = "kelly";
-
-  // A refinement loop.
-  for (unsigned int r_step=0; r_step<max_r_steps; r_step++)
-  {
-      std::cout << "Beginning Solve " << r_step << std::endl;
-
-	  system.solve();
-
-      std::cout << "System has: " << equation_systems.n_active_dofs()
-                << " degrees of freedom."
-                << std::endl;
-
-      std::cout << "Linear solver converged at step: "
-                << system.n_linear_iterations()
-                << ", final residual: "
-                << system.final_linear_residual()
-                << std::endl;
-
-//      // Compute the error.
-//      exact_sol.compute_error("Poisson", "u");
+//	// Attach body force.
+//	system.attach_body_force(&body_force);
+//	Compliance complianceqoi;
 //
-//      // Print out the error values
-//      std::cout << "L2-Error is: "
-//                << exact_sol.l2_error("Poisson", "u")
-//                << std::endl;
-//      std::cout << "H1-Error is: "
-//                << exact_sol.h1_error("Poisson", "u")
-//                << std::endl;
+//	complianceqoi.attach_body_force(&body_force);
+//
+//	system.attach_qoi( &complianceqoi );
 
 
-      // Possibly refine the mesh
-      if (r_step+1 != max_r_steps)
-        {
-          std::cout << "  Refining the mesh..." << std::endl;
-		  // The \p ErrorVector is a particular \p StatisticsVector
-		  // for computing error information on a finite element mesh.
-		  ErrorVector error;
-		  if (indicator_type == "uniform")
+
+	// Create QoIs set and indices
+	QoISet qois(system);
+	std::vector<unsigned int> qoi_indices;
+	qoi_indices.push_back(0);
+	qois.add_indices(qoi_indices);
+	qois.set_weight(0, 1.0);
+
+
+//	VonMisesPnorm vonmises(&densities,&system,&qois);
+//	system.p_norm_objectivefunction = true;
+//	system.attach_qoi(&vonmises);
+//
+//	p_norm_objectivefunction = true;
+
+
+
+	// Initialize the data structures for the equation system.
+	equation_systems.init();
+
+	mesh.print_info();
+
+
+	// Give the system a pointer to the matrix assembly
+	// function.  This will be called when needed by the
+	// library.
+	//system.attach_assemble_function (assemble_elasticity);
+
+	std::cout<<"Print boundary info now"<<std::endl;
+	mesh.boundary_info->print_info();
+
+	// Set linear solver max iterations
+	const int max_linear_iterations   = 2500;
+	equation_systems.parameters.set<unsigned int>("linear solver maximum iterations")
+	= max_linear_iterations;
+
+	// Linear solver tolerance.
+	equation_systems.parameters.set<Real>("linear solver tolerance") = 1e-7;
+
+	// Prints information about the system to the screen.
+	equation_systems.print_info();
+
+	// Solve the system "Elasticity".  Note that calling this
+	// member will assemble the linear system and invoke
+	// the default numerical solver.  With PETSc the solver can be
+	// controlled from the command line.  For example,
+	// you can invoke conjugate gradient with:
+	//
+	// ./vector_fe_ex1 -ksp_type cg
+	//
+	// You can also get a nice X-window that monitors the solver
+	// convergence with:
+	//
+	// ./vector_fe_ex1 -ksp_xmonitor
+	//
+	// if you linked against the appropriate X libraries when you
+	// built PETSc.
+
+	ParameterVector design_variables;
+
+
+	const std::string indicator_type = "kelly";
+
+
+	// A refinement loop.
+	for (unsigned int r_step=0; r_step<param.max_adaptivesteps; r_step++)
+	{
+		mesh.print_info();
+		equation_systems.print_info();
+		std::cout << "Beginning Solve " << r_step << std::endl;
+
+		// Vector of variables
+		std::vector<double> x(mesh.n_active_elem());
+
+		// Initial estimation
+		for (std::vector<double>::iterator it = x.begin(); it != x.end(); it++)
+			*it = param.initial_density;
+
+
+		//system.update_kernel();
+
+		// Transfer the value of the variables to the density field
+		// filter them if the boolean filter is true
+		bool filter = false;
+		system.transfer_densities(densities, mesh, x, filter);
+
+		// Solve system
+		system.solve();
+
+		std::cout << "System has: " << equation_systems.n_active_dofs()
+				<< " degrees of freedom."
+				<< std::endl;
+
+		std::cout << "Linear solver converged at step: "
+				<< (system.time_solver->diff_solver())->total_inner_iterations()
+				<< std::endl;
+
+		// Get a pointer to the primal solution vector
+		NumericVector<Number> &primal_solution = *system.solution;
+
+		SensitivityData sensitivities(qois, system, system.get_parameter_vector());
+
+		// Make sure we get the contributions to the adjoint RHS from the sides
+		system.assemble_qoi_sides = true;
+
+	    // We are about to solve the adjoint system, but before we do this we see the same preconditioner
+	    // flag to reuse the preconditioner from the forward solver
+		system.get_linear_solver()->reuse_preconditioner(true);
+
+		// Here we solve the adjoint problem inside the adjoint_qoi_parameter_sensitivity
+		// function, so we have to set the adjoint_already_solved boolean to false
+		system.set_adjoint_already_solved(false);
+
+		// Here we calculate the QoIs before the sensitivity analysis because we need it for the
+		// VonMises objective function. This QoI doesn't take into account the p-norm exponent.
+	    system.calculate_qoi(qois);
+
+		// Compute the sensitivities
+		system.adjoint_qoi_parameter_sensitivity(qois, system.get_parameter_vector(), sensitivities);
+
+//		// Now that we have solved the adjoint, set the adjoint_already_solved boolean to true, so we dont solve unneccesarily in the error estimator
+		system.set_adjoint_already_solved(true);
+//
+		system.finite_differences_check(&densities,qois,sensitivities,system.get_parameter_vector());
+////
+////
+		system.finite_differences_partial_derivatives_check(qois,system.get_parameter_vector(),sensitivities, p_norm_objectivefunction);
+
+//		// Number of variables for the optimizer, equal to the number of active elements, changes with each refinement
+//		dof_id_type n_variables = mesh.n_active_elem();
+//
+//		// Build optimizer
+//		nlopt::opt opt(nlopt::LD_MMA,n_variables);
+//
+//		// Set up lower bounds
+//		std::vector<double> lb(n_variables);
+//		for (std::vector<double>::iterator it = lb.begin(); it != lb.end(); it++)
+//			*it = param.minimum_density;
+//		opt.set_lower_bounds(lb);
+//
+//		// Set up upper bounds
+//		std::vector<double> ub(n_variables);
+//		for (std::vector<double>::iterator it = ub.begin(); it != ub.end(); it++)
+//			*it = 1.0;
+//		opt.set_upper_bounds(ub);
+//
+//		// Pointer to the euqtion systems to pass it to the optimizer
+//		EquationSystems * equation_systems_pointer = &equation_systems;
+//		// Attach objective function
+//		opt.set_min_objective(myfunc, equation_systems_pointer);
+//		opt.add_inequality_constraint(myvolumeconstraint, equation_systems_pointer);
+//
+//		// Set stopping criteria
+//		opt.set_xtol_rel(1e-6);
+//		opt.set_ftol_rel(1e-6);
+//
+//		// Run optimizer
+//		double minf;
+//		nlopt::result result = opt.optimize(x, minf);
+
+		// Print out the H1 norm, for verification purposes: NOT IMPLEMENTED IN VECTOR ELEMENTS
+		// Real H1norm = system.calculate_norm(*system.solution, SystemNorm(H1));
+
+		//std::cout << "H1 norm = " << H1norm << std::endl;
+
+		// Compute the error.
+		//      exact_sol.compute_error("Elasticity", "u");
+		//
+		//      // Print out the error values
+		//      std::cout << "L2-Error is: "
+		//                << exact_sol.l2_error("Elasticity", "u")
+		//                << std::endl;
+		//      std::cout << "H1-Error is: "
+		//                << exact_sol.h1_error("Elasticity", "u")
+		//                << std::endl;
+		// Possibly refine the mesh
+		std::cout << "Terminamos FD check" << std::endl;
+		if (r_step+1 != param.max_adaptivesteps)
+		{
+		  std::cout << "  Refining the mesh..." << std::endl;
+		  // Uniform refinement
+		  if(param.refine_uniformly)
 			{
-			  // Error indication based on uniform refinement
-			  // is reliable, but very expensive.
-			  UniformRefinementEstimator error_estimator;
+			  std::cout<<"Refining Uniformly"<<std::endl<<std::endl;
 
-			  error_estimator.estimate_error (system, error);
+			  mesh_refinement->uniformly_refine(1);
 			}
+		   //Adaptively refine based on reaching an error tolerance
+		          else if(param.global_tolerance >= 0. && param.nelem_target == 0.)
+		            {
+		              // Now we construct the data structures for the mesh refinement process
+		              ErrorVector error;
+
+		              // Build an error estimator object
+		              AutoPtr<ErrorEstimator> error_estimator =
+		                build_error_estimator(param);
+
+
+		              // Estimate the error in each element using the Adjoint Residual or Kelly error estimator
+		              error_estimator->estimate_error(system, error);
+
+		              mesh_refinement->flag_elements_by_error_tolerance (error);
+
+		              mesh_refinement->refine_and_coarsen_elements();
+		            }
+		  // Adaptively refine based on reaching a target number of elements
 		  else
 			{
+		//              // Now we construct the data structures for the mesh refinement process
+		//              ErrorVector error;
+		//
+		//              // Build an error estimator object
+		//              AutoPtr<ErrorEstimator> error_estimator =
+		//                build_error_estimator(param);
+		//
+		//              // Estimate the error in each element using the Adjoint Residual or Kelly error estimator
+		//              error_estimator->estimate_error(system, error);
+		//
+		//              if (mesh.n_active_elem() >= param.nelem_target)
+		//                {
+		//                  std::cout<<"We reached the target number of elements."<<std::endl <<std::endl;
+		//                  break;
+		//                }
+		//
+		//              mesh_refinement->flag_elements_by_nelem_target (error);
+		//
+		//              mesh_refinement->refine_and_coarsen_elements();
+
+			  ErrorVector error;
 			  libmesh_assert_equal_to (indicator_type, "kelly");
 
 			  // The Kelly error estimator is based on
 			  // an error bound for the Poisson problem
 			  // on linear elements, but is useful for
 			  // driving adaptive refinement in many problems
-			  KellyErrorEstimator error_estimator;
+			  KellyErrorEstimatorElasticity error_estimator;
 
 			  error_estimator.estimate_error (system, error);
+			  // Output error estimate magnitude
+			  libMesh::out << "Error estimate\nl2 norm = " << error.l2_norm() <<
+				"\nmaximum = " << error.maximum() << std::endl;
+			  // This takes the error in \p error and decides which elements
+			  // will be coarsened or refined.  Any element within 20% of the
+			  // maximum error on any element will be refined, and any
+			  // element within 10% of the minimum error on any element might
+			  // be coarsened. Note that the elements flagged for refinement
+			  // will be refined, but those flagged for coarsening _might_ be
+			  // coarsened.
+			  mesh_refinement->flag_elements_by_error_fraction (error);
+
+			  // This call actually refines and coarsens the flagged
+			  // elements.
+			  mesh_refinement->refine_and_coarsen_elements();
 			}
 
-          // This takes the error in \p error and decides which elements
-          // will be coarsened or refined.  Any element within 20% of the
-          // maximum error on any element will be refined, and any
-          // element within 10% of the minimum error on any element might
-          // be coarsened. Note that the elements flagged for refinement
-          // will be refined, but those flagged for coarsening _might_ be
-          // coarsened.
-          mesh_refinement.flag_elements_by_error_fraction (error);
-
-          // This call actually refines and coarsens the flagged
-          // elements.
-          mesh_refinement.refine_and_coarsen_elements();
-
-          // This call reinitializes the \p EquationSystems object for
-          // the newly refined mesh.  One of the steps in the
-          // reinitialization is projecting the \p solution,
-          // \p old_solution, etc... vectors from the old mesh to
-          // the current one.
-    	  equation_systems.reinit();
-        }
-  }
-
-
-#ifdef LIBMESH_HAVE_EXODUS_API
-  ExodusII_IO(mesh).write_equation_systems( "out_parallel.e", equation_systems);
-#endif
-
-#ifdef LIBMESH_HAVE_GMV
-  GMVIO(mesh).write_equation_systems( "out.gmv", equation_systems);
-#endif
-
-  // All done.
-  return 0;
-}
-
-Number exact_solution(const Point& p,
-                           const Parameters&,  // parameters, not needed
-                           const std::string&, // sys_name, not needed
-                           const std::string&) // unk_name, not needed
-  {
-    const Real x = p(0);
-    const Real y = p(1);
-
-    Gradient solution;
-    solution(0) = 256.*(x-x*x)*(x-x*x)*(y-y*y)*(y-y*y);
-    solution(1) = 256.*(x-x*x)*(x-x*x)*(y-y*y)*(y-y*y);
-
-    return 256.*(x-x*x)*(x-x*x)*(y-y*y)*(y-y*y);
-  }
-
-Gradient exact_derivative(const Point& p,
-                              const Parameters&,  // parameters, not needed
-                              const std::string&, // sys_name, not needed
-                              const std::string&) // unk_name, not needed
- {
-   const Real x = p(0);
-   const Real y = p(1);
-
-   Tensor gradu;
-   gradu(0,0) = 256.*2.*(x-x*x)*(1-2*x)*(y-y*y)*(y-y*y);
-   gradu(0,1) = 256.*2.*(x-x*x)*(1-2*x)*(y-y*y)*(y-y*y);
-   gradu(1,0) = 256.*2.*(x-x*x)*(x-x*x)*(y-y*y)*(1-2*y);
-   gradu(1,1) = 256.*2.*(x-x*x)*(x-x*x)*(y-y*y)*(1-2*y);
-
-   //FIXME We're trying to see what happens when we calculate the error with a exact solution if we have the default exact_solution and exact_derivative
-   Gradient graduTemp;
-   graduTemp(0) = 256.*2.*(x-x*x)*(1-2*x)*(y-y*y)*(y-y*y);
-   graduTemp(1) = 256.*2.*(x-x*x)*(x-x*x)*(y-y*y)*(1-2*y);
-
-   return graduTemp;
- }
-
-
-void DNHatMatrix(DenseMatrix<Real> & DNhat, const unsigned int & dim, int & phiSize, const std::vector<std::vector<RealTensor> >& dphi, unsigned int & qp) {
-	DNhat.resize(phiSize,dim*dim);
-	for (unsigned int ii = 0; ii<phiSize/dim; ii++) {
-		for (unsigned int jj = 0; jj<dim; jj++) {
-			for (unsigned int i = 0; i<dim; i++) {
-				DNhat(dim*ii + i,dim*jj + i) = dphi[dim*ii][qp](0,jj);
-			}
+		  // This call reinitializes the \p EquationSystems object for
+		  // the newly refined mesh.  One of the steps in the
+		  // reinitialization is projecting the \p solution,
+		  // \p old_solution, etc... vectors from the old mesh to
+		  // the current one.
+		  equation_systems.reinit();
+		  std::cout << "Refined mesh to "
+					<< mesh.n_active_elem()
+					<< " active elements and "
+					<< equation_systems.n_active_dofs()
+					<< " active dofs." << std::endl;
 		}
 	}
+
+	//compute_von_mises(equation_systems);
+
+
+	#ifdef LIBMESH_HAVE_EXODUS_API
+	ExodusII_IO(mesh).write_equation_systems( "out_parallel.e", equation_systems);
+	//ExodusII_IO(mesh).write_element_data(equation_systems);
+	//std::set<std::string>* system_names;
+	//std::pair<std::set<std::string>::iterator,bool> ret = system_names->insert("Densities");
+	//ExodusII_IO(mesh).write_discontinuous_exodusII("densidades.e",equation_systems,system_names);
+	#endif
+
+	#ifdef LIBMESH_HAVE_GMV
+	GMVIO(mesh).write_equation_systems( "out.gmv", equation_systems);
+	#endif
+
+	/*
+	*
+	* PLOT GRADIENTS !!!
+	*
+	*/
+
+	// All done.
+	return 0;
 }
 
-void NHatMatrix(DenseMatrix<Real> & Nhat, const unsigned int & dim, int & phiSize, const std::vector<std::vector<RealGradient> >& phi, unsigned int & qp) {
-	Nhat.resize(phiSize,dim);
-	for (unsigned int ii = 0; ii<phiSize/dim; ii++) {
-		for (unsigned int i = 0; i<dim; i++) {
-			Nhat(dim*ii + i,i) = phi[dim*ii][qp](0);
-		}
-	}
-}
-
-void EvalElasticity(DenseMatrix<Real> & CMat, const std::vector<Point>& q_point, const unsigned int & dim, unsigned int & qp) {
-
-	// Mesh is [0 , 1] x [0 , 0.2]
-	// Different materials for [0, 0.5] and [0.5 , 1]
-	// This can be optimized, and it should be!
-	Real lambda, mu;
-    const Real x = q_point[qp](0);
-    bool poisson = false;
-    if (poisson){
-    	  CMat(0,0) = 1;
-    	  CMat(1,1) = 1;
-    	  CMat(2,2) = 1;
-    	  CMat(3,3) = 1;
-    }
-    else {
-   		if ( x <= 0.5){
-			lambda = 5;
-			mu = 2;
-			// FIXME Now it's the fourth order identity tensor because of the manufactured solution
-			if (dim == 2) {
-			  CMat(0,0) = lambda + 2*mu;
-			  CMat(3,3) = lambda + 2*mu;
-			  CMat(1,1) = mu;
-			  CMat(1,2) = mu;
-			  CMat(2,1) = mu;
-			  CMat(2,2) = mu;
-			  CMat(3,0) = lambda;
-			  CMat(0,3) = lambda;
-			}
-		}
-		else {
-			lambda = 10;
-			mu = 4;
-			if (dim == 2) {
-			  CMat(0,0) = lambda + 2*mu;
-			  CMat(3,3) = lambda + 2*mu;
-			  CMat(1,1) = mu;
-			  CMat(1,2) = mu;
-			  CMat(2,1) = mu;
-			  CMat(2,2) = mu;
-			  CMat(3,0) = lambda;
-			  CMat(0,3) = lambda;
-			}
-		}
-    }
-}
-
-// We now define the matrix assembly function for the
-// Poisson system.  We need to first compute element
-// matrices and right-hand sides, and then take into
-// account the boundary conditions, which will be handled
-// via a penalty method.
-
-void assemble_poisson(EquationSystems& es,
-                      const std::string& system_name)
-{
-
-  // It is a good idea to make sure we are assembling
-  // the proper system.
-  libmesh_assert_equal_to (system_name, "Poisson");
-
-
-  // Get a constant reference to the mesh object.
-  const MeshBase& mesh = es.get_mesh();
-
-  // The dimension that we are running
-  const unsigned int dim = mesh.mesh_dimension();
-
-  // Get a reference to the LinearImplicitSystem we are solving
-  LinearImplicitSystem& system = es.get_system<LinearImplicitSystem> ("Poisson");
-
-  // A reference to the  DofMap object for this system.  The  DofMap
-  // object handles the index translation from node and element numbers
-  // to degree of freedom numbers.  We will talk more about the  DofMap
-  // in future examples.
-  const DofMap& dof_map = system.get_dof_map();
-
-  // Get a constant reference to the Finite Element type
-  // for the first (and only) variable in the system.
-  FEType fe_type = dof_map.variable_type(0);
-
-  // Build a Finite Element object of the specified type.
-  // Note that FEVectorBase is a typedef for the templated FE
-  // class.
-  AutoPtr<FEVectorBase> fe (FEVectorBase::build(dim, fe_type));
-
-  // A 5th order Gauss quadrature rule for numerical integration.
-  QGauss qrule (dim, FIFTH);
-
-  // Tell the finite element object to use our quadrature rule.
-  fe->attach_quadrature_rule (&qrule);
-
-//  // Declare a special finite element object for
-//  // boundary integration.
-//  AutoPtr<FEVectorBase> fe_face (FEVectorBase::build(dim, fe_type));
-//
-//  // Boundary integration requires one quadraure rule,
-//  // with dimensionality one less than the dimensionality
-//  // of the element.
-//  QGauss qface(dim-1, FIFTH);
-//
-//  // Tell the finite element object to use our
-//  // quadrature rule.
-//  fe_face->attach_quadrature_rule (&qface);
-
-  // Here we define some references to cell-specific data that
-  // will be used to assemble the linear system.
-  //
-  // The element Jacobian * quadrature weight at each integration point.
-  const std::vector<Real>& JxW = fe->get_JxW();
-
-  // The physical XY locations of the quadrature points on the element.
-  // These might be useful for evaluating spatially varying material
-  // properties at the quadrature points.
-  const std::vector<Point>& q_point = fe->get_xyz();
-
-  // The element shape functions evaluated at the quadrature points.
-  // Notice the shape functions are a vector rather than a scalar.
-  const std::vector<std::vector<RealGradient> >& phi = fe->get_phi();
-
-  // The element shape function gradients evaluated at the quadrature
-  // points. Notice that the shape function gradients are a tensor.
-  const std::vector<std::vector<RealTensor> >& dphi = fe->get_dphi();
-
-  // Define data structures to contain the element matrix
-  // and right-hand-side vector contribution.  Following
-  // basic finite element terminology we will denote these
-  // "Ke" and "Fe".  These datatypes are templated on
-  //  Number, which allows the same code to work for real
-  // or complex numbers.
-  DenseMatrix<Number> Ke;
-  DenseVector<Number> Fe;
-
-
-  // This vector will hold the degree of freedom indices for
-  // the element.  These define where in the global system
-  // the element degrees of freedom get mapped.
-  std::vector<dof_id_type> dof_indices;
-
-  // Now we will loop over all the elements in the mesh.
-  // We will compute the element matrix and right-hand-side
-  // contribution.
-  //
-  // Element iterators are a nice way to iterate through all the
-  // elements, or all the elements that have some property.  The
-  // iterator el will iterate from the first to the last element on
-  // the local processor.  The iterator end_el tells us when to stop.
-  // It is smart to make this one const so that we don't accidentally
-  // mess it up!  In case users later modify this program to include
-  // refinement, we will be safe and will only consider the active
-  // elements; hence we use a variant of the \p active_elem_iterator.
-  MeshBase::const_element_iterator       el     = mesh.active_local_elements_begin();
-  const MeshBase::const_element_iterator end_el = mesh.active_local_elements_end();
-
-  // Loop over the elements.  Note that  ++el is preferred to
-  // el++ since the latter requires an unnecessary temporary
-  // object.
-
-  // Create DNhat Matrices
-  DenseMatrix<Real> DNhat, Nhat;
-  // Create CMat Matrices
-  DenseMatrix<Real> CMat;
-  CMat.resize(dim*dim,dim*dim);
-  DenseVector<Real> f;
-  f.resize(dim);
-  // Dummy parameters structure and string
-  const Parameters _parameters;
-  const std::string dummy;
-
-  for ( ; el != end_el ; ++el)
-    {
-      // Store a pointer to the element we are currently
-      // working on.  This allows for nicer syntax later.
-      const Elem* elem = *el;
-
-      // Get the degree of freedom indices for the
-      // current element.  These define where in the global
-      // matrix and right-hand-side this element will
-      // contribute to.
-      dof_map.dof_indices (elem, dof_indices);
-
-      // Compute the element-specific data for the current
-      // element.  This involves computing the location of the
-      // quadrature points (q_point) and the shape functions
-      // (phi, dphi) for the current element.
-      fe->reinit (elem);
-
-
-      // Zero the element matrix and right-hand side before
-      // summing them.  We use the resize member here because
-      // the number of degrees of freedom might have changed from
-      // the last element.  Note that this will be the case if the
-      // element type is different (i.e. the last element was a
-      // triangle, now we are on a quadrilateral).
-
-      // The  DenseMatrix::resize() and the  DenseVector::resize()
-      // members will automatically zero out the matrix  and vector.
-      Ke.resize (dof_indices.size(),
-                 dof_indices.size());
-
-      Fe.resize (dof_indices.size());
-      // Now loop over the quadrature points.  This handles
-      // the numeric integration.
-      for (unsigned int qp=0; qp<qrule.n_points(); qp++)
-        {
-    	  int phiSize = phi.size();
-    	  clock_t t;
-    	  t = clock();
-    	  DNHatMatrix( DNhat, dim, phiSize,  dphi, qp);
-    	  EvalElasticity(CMat,q_point,dim,qp);
-    	  DNhat.right_multiply(CMat);
-    	  DNhat.right_multiply_transpose(DNhat);
-    	  DNhat *= JxW[qp];
-    	  Ke += DNhat;
-    	  t = clock() - t;
-          // This is the end of the matrix summation loop
-          // Now we build the element right-hand-side contribution.
-          // This involves a single loop in which we integrate the
-          // "forcing function" in the PDE against the test functions.
-          {
-            const Real x = q_point[qp](0);
-            const Real y = q_point[qp](1);
-            const Real eps = 1.e-3;
-
-
-            // "f" is the forcing function for the Poisson equation.
-            // In this case we set f to be a finite difference
-            // Laplacian approximation to the (known) exact solution.
-            //
-            // We will use the second-order accurate FD Laplacian
-            // approximation, which in 2D is
-            //
-            // u_xx + u_yy = (u(i,j-1) + u(i,j+1) +
-            //                u(i-1,j) + u(i+1,j) +
-            //                -4*u(i,j))/h^2
-            //
-            // Since the value of the forcing function depends only
-            // on the location of the quadrature point (q_point[qp])
-            // we will compute it here, outside of the i-loop
-//            const Number fx = -(exact_solution(Point(x,y-eps,0),_parameters,dummy,dummy) +
-//                              exact_solution(Point(x,y+eps,0),_parameters,dummy,dummy) +
-//                              exact_solution(Point(x-eps,y,0),_parameters,dummy,dummy) +
-//                              exact_solution(Point(x+eps,y,0),_parameters,dummy,dummy) -
-//                              4.*exact_solution(Point(x,y,0),_parameters,dummy,dummy))/eps/eps;
-//
-//            const Number fy = -(exact_solution(Point(x,y-eps,0),_parameters,dummy,dummy) +
-//                    exact_solution(Point(x,y+eps,0),_parameters,dummy,dummy) +
-//                    exact_solution(Point(x-eps,y,0),_parameters,dummy,dummy) +
-//                    exact_solution(Point(x+eps,y,0),_parameters,dummy,dummy) -
-//                    4.*exact_solution(Point(x,y,0),_parameters,dummy,dummy))/eps/eps;
-//            f(0) = fx; f(1) = fy;
-
-            //FIXME Temporal body force
-            f(0) = 0;
-            f(1) = 10;
-
-            NHatMatrix( Nhat, dim, phiSize,  phi, qp);
-
-            Nhat.vector_mult(Fe,f);
-            Fe *= JxW[qp];
-
-
-          }
-        }
-      }
-
-      // We have now finished the quadrature point loop,
-      // and have therefore applied all the boundary conditions.
-
-      // If this assembly program were to be used on an adaptive mesh,
-      // we would have to apply any hanging node constraint equations
-      dof_map.constrain_element_matrix_and_vector (Ke, Fe, dof_indices);
-
-      // The element matrix and right-hand-side are now built
-      // for this element.  Add them to the global matrix and
-      // right-hand-side vector.  The  SparseMatrix::add_matrix()
-      // and  NumericVector::add_vector() members do this for us.
-      system.matrix->add_matrix (Ke, dof_indices);
-      system.rhs->add_vector    (Fe, dof_indices);
-
-
-  // All done!
-}

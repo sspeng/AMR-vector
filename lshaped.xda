@@ -1,0 +1,28 @@
+DEAL 003:003
+4	 # Num. Elements
+10	 # Num. Nodes
+16	 # Length of connectivity vector (Num elements * Num Nodes)
+2	 # Num. Boundary Conds.
+65536	 # String Size (ignore) 
+1	 # Num. Element Types. We just have quads, no triangles
+5 	 # Element types in each block. 5 Corresponds to QUAD4 in the libMeshEnums::ElemType namespace
+4 	 # Num. of elements in each block.
+Id String
+Title String
+0 1 4 5
+1 2 3 4
+5 4 6 7
+7 6 8 9
+0. 0. 0.
+1. 0. 0.
+2. 0. 0.
+2. 1. 0.
+1. 1. 0.
+0. 1. 0.
+1. 2. 0.
+0. 2. 0.
+1. 3. 0.
+0. 3. 0.
+3  2  0
+1  1  1
+

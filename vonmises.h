@@ -1,21 +1,25 @@
 
 #ifndef VONMISES_H
-#define VONMISES_H_H
+#define VONMISES_H
 
 #include "libmesh/libmesh_common.h"
-#include "libmesh/elem.h"
 #include "libmesh/fe_base.h"
 #include "libmesh/fem_context.h"
 #include "libmesh/point.h"
 #include "libmesh/quadrature.h"
 #include "libmesh/diff_qoi.h"
+
+#include "TopOpt.h"
 #include "libmesh/explicit_system.h"
+#include "libmesh/elem.h"
+#include "libmesh/numeric_vector.h"
+#include "libmesh/auto_ptr.h"
 
 
 // Bring in everything from the libMesh namespace
 using namespace libMesh;
 
-class TopOptSystem;
+
 
 class VonMisesPnorm : public DifferentiableQoI
 {
@@ -31,7 +35,12 @@ public:
 
 	virtual void element_qoi (DiffContext &context, const QoISet & qois);
 
-	void element_qoi_derivative_parameter (DiffContext &context, Number & parameter_derivative, Number density_element);
+	virtual void element_qoi_derivative_parameter (DiffContext &context, Number & parameter_derivative, Number density_element);
+
+	virtual void element_qoi_for_FD (AutoPtr<NumericVector<Number> > & local_solution,
+											AutoPtr<NumericVector<Number> >& densities_vector,
+													const Elem * elem,
+													DiffContext & context, Number & qoi_computed);
 
 	void SIMP_function(Number & density){
 		Number phi = density/(0.3*(1 - density) + density);
@@ -44,7 +53,6 @@ public:
 
 		density = phi;
 	}
-
 
 
 	virtual AutoPtr<DifferentiableQoI> clone( ) {

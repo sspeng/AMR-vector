@@ -1,3 +1,9 @@
+
+
+#ifndef TOPOPT_H
+#define TOPOPT_H
+
+
 #include "libmesh/enum_fe_family.h"
 #include "libmesh/fem_system.h"
 
@@ -30,6 +36,7 @@ public:
                 const std::string& name_in,
                 const unsigned int number_in)
     :  kernel_filter(this->comm()),
+       kernel_filter_parallel(this->comm()),
 		densities_filtered(this->comm()),
 		gradient_filtered(this->comm()),
 		gradient_filtered_temp(this->comm()),
@@ -84,10 +91,6 @@ public:
   NumericVector<Number> & add_resder_rhs (unsigned int i);
 
   NumericVector<Number> & get_resder_rhs (unsigned int i);
-
-  NumericVector<Number> & add_dqdu_fd (unsigned int i);
-
-  NumericVector<Number> & get_dqdu_fd (unsigned int i);
 
   /*
    * RAMP functions. Necessary to obtain a 0-1 solution.
@@ -187,6 +190,11 @@ public:
 													   SensitivityData&       sensitivities,
 													   bool & p_norm_objectivefunction);
 
+  void attach_advanced_qoi( DifferentiableQoI* qoi_in )
+  { advanced_qoi.push_back((qoi_in->clone()).release());
+    // User needs to resize qoi system qoi accordingly
+  advanced_qoi.back()->init_qoi( this->qoi );}
+
   // Some parameters that are public
   // Parameter for the filter
   Number epsilon;
@@ -215,7 +223,8 @@ public:
   Number calculate_volume_constraint(ExplicitSystem & densities, std::vector<double> & grad);
 
   // Matrix that contains the filter to be applied to the densities
-  PetscMatrix<Number> kernel_filter;
+  PetscMatrix<Number> kernel_filter, kernel_filter_parallel;
+
 
   // Vector that contains the filtered densities
   PetscVector<Number> densities_filtered, gradient_filtered, gradient_filtered_temp;
@@ -231,6 +240,12 @@ public:
 
 
 protected:
+
+  /*
+   * Array that contains the advaced diff qoi
+   */
+  std::vector<DifferentiableQoI *> advanced_qoi;
+
   // System initialization
   virtual void init_data ();
 
@@ -312,3 +327,5 @@ protected:
   // Contributions from body force?
   bool integrate_body_force = false;
 };
+
+#endif

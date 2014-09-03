@@ -1,7 +1,15 @@
 #include "compliance_traction.h"
 #include "libmesh/elasticity_tools.h"
+#include "libmesh/dof_map.h"
 
 using namespace libMesh;
+
+ComplianceTraction::ComplianceTraction(ExplicitSystem * densities, TopOptSystem * femsystem){
+
+	_densities = densities;
+
+	_femsystem = femsystem;
+}
 
 void ComplianceTraction::init_qoi( std::vector<Number>& sys_qoi )
 {
@@ -62,18 +70,6 @@ void ComplianceTraction::side_qoi (DiffContext &context,
   //short int bc_id = mesh.boundary_info->boundary_id	(elem,side);
 
 
-//	const Elem & elem = c.get_elem();
-//	for (unsigned int i = 0; i != 4; i++)
-//	{
-//		Node * p = elem.get_node(i);
-//		Gradient U;
-//		c.point_value(0,*p,U);
-//		std::cout<<"\n Nodo"<<std::endl;
-//		p->print();
-//		std::cout<<"\n Valor"<<std::endl;
-//		U.print();
-//		std::cout<<"\n"<<std::endl;
-//	}
 
   if (!side_BdId.empty() && side_BdId[0] == 1 && integrate_boundary_sides)
   {
@@ -163,5 +159,86 @@ void ComplianceTraction::side_qoi_derivative (DiffContext &context,
 
 		} // end of the quadrature point qp-loop
   }
+}
+
+
+void ComplianceTraction::element_qoi_for_FD (AutoPtr<NumericVector<Number> > & local_solution,
+											AutoPtr<NumericVector<Number> >& densities_vector,
+													const Elem * elem,
+													DiffContext & context, Number & qoi_computed)
+{
+	FEMContext &c = libmesh_cast_ref<FEMContext&>(context);
+	// Grab boundary ids in side element
+	std::vector<boundary_id_type> side_BdId = c.side_boundary_ids();
+
+	  if (!side_BdId.empty() && side_BdId[0] == 1 && integrate_boundary_sides)
+	  {
+
+
+		FEVectorBase* elem_fe_face = NULL;
+		c.get_side_fe( 0, elem_fe_face );
+
+		// Element Jacobian * quadrature weights for interior integration
+		const std::vector<Real> &JxW_side = elem_fe_face->get_JxW();
+
+		// Derivatives of the element basis functions
+		const std::vector<std::vector<RealGradient> > phi = elem_fe_face->get_phi();
+
+		// Number of gauss points
+		unsigned int n_qpoints = c.get_side_qrule().n_points();
+
+		const unsigned int dim = c.get_dim();
+
+		Number VonMises = 0.;
+
+
+		// Calculate stresses first, we only pick one gauss point, because the gradient is constant
+		DenseMatrix<Number>  Nhat;
+		DenseVector<Number> U, U_sol;
+		Nhat.resize((elem_fe_face->get_phi().size()),dim);
+		U_sol.resize((elem_fe_face->get_phi().size()));
+
+
+
+
+		// Because the traction is constant along the face, we call it now
+		System * dummy;
+		std::pair<bool,Gradient>  flux_pair = _bc_function(*dummy,Point(0,0,0), "u");
+
+		// Get the gradient
+		// Grab the dof indices for this element (global degree of freedom)
+		std::vector<dof_id_type> indices;
+		unsigned int u_var = _femsystem->variable_number ("u");
+
+		_femsystem->get_dof_map().dof_indices(elem,indices,u_var);
+		// Grab the values for these indices
+		std::vector<Number> values;
+
+		local_solution->get(indices,values);
+
+			  // Loop over quadrature points
+			  for (unsigned int qp = 0; qp != n_qpoints; qp++)
+				{
+
+					ElasticityTools::NHatMatrix(Nhat,dim,phi,qp);
+
+					U_sol(0) = values[0];
+					U_sol(1) = values[1];
+					U_sol(2) = values[2];
+					U_sol(3) = values[3];
+
+					U_sol(4) = values[4];
+					U_sol(5) = values[5];
+					U_sol(6) = values[6];
+					U_sol(7) = values[7];
+
+
+					Nhat.vector_mult_transpose(U,U_sol);
+				  // Update the elemental increment dR for each qp
+				  qoi_computed += JxW_side[qp] * (U(0) * flux_pair.second(0) + U(1) * flux_pair.second(1));
+				}
+		  }
+
+
 }
 

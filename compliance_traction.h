@@ -9,6 +9,10 @@
 #include "libmesh/point.h"
 #include "libmesh/quadrature.h"
 #include "libmesh/diff_qoi.h"
+#include "libmesh/auto_ptr.h"
+#include "libmesh/numeric_vector.h"
+#include "TopOpt.h"
+#include "libmesh/explicit_system.h"
 
 // Bring in everything from the libMesh namespace
 using namespace libMesh;
@@ -16,7 +20,9 @@ using namespace libMesh;
 class ComplianceTraction : public DifferentiableQoI
 {
 public:
-	ComplianceTraction(){};
+
+
+	ComplianceTraction(ExplicitSystem * densities, TopOptSystem * femsystem);
   virtual ~ComplianceTraction(){}
 
   virtual void init_qoi( std::vector<Number>& sys_qoi );
@@ -30,6 +36,11 @@ public:
   void attach_flux_bc_function (std::pair<bool,Gradient> fptr(const System& ,
                                                                           const Point& ,
                                                                           const std::string&));
+
+  virtual void element_qoi_for_FD (AutoPtr<NumericVector<Number> > & local_solution,
+											AutoPtr<NumericVector<Number> >& densities_vector,
+													const Elem * elem,
+													DiffContext & context, Number & qoi_computed);
 
   virtual AutoPtr<DifferentiableQoI> clone( ) {
     return AutoPtr<DifferentiableQoI> ( new ComplianceTraction(*this) );
@@ -47,6 +58,9 @@ protected:
 
   unsigned int compliance_traction_index;
 
+  ExplicitSystem * _densities;
+
+  TopOptSystem * _femsystem;
 
 };
 #endif // L_QOI_H

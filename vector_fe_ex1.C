@@ -135,8 +135,8 @@ void write_output(EquationSystems &es,
 
 void EvalElasticity(DenseMatrix<Real> & CMat) {
 
-	Number _lambda = 200e3;
-	Number _mu = 100e3;
+	Number _lambda = 200e6;
+	Number _mu = 100e6;
 	CMat(0,0) = _lambda + 2*_mu;
 	CMat(3,3) = _lambda + 2*_mu;
 	CMat(1,1) = _mu;
@@ -399,7 +399,7 @@ AutoPtr<MeshRefinement> build_mesh_refinement(MeshBase &mesh,
 // forward and adjoint weights. The H1 seminorm component of the error is used
 // as dictated by the weak form the Laplace equation.
 
-AutoPtr<ErrorEstimator> build_error_estimator(FEMParameters &param)
+AutoPtr<ErrorEstimator> build_error_estimator(FEMParameters &param, TopOptSystem & system)
 {
   AutoPtr<ErrorEstimator> error_estimator;
 
@@ -632,24 +632,25 @@ int main (int argc, char** argv)
 	EquationSystems equation_systems (mesh);
 
 
-
-	// Declare the Elasticity system and its variables.
-	TopOptSystem& system = equation_systems.add_system<TopOptSystem> ("Elasticity");
 	// Build an auxiliary explicit system for the densities
 	ExplicitSystem & densities = equation_systems.add_system<ExplicitSystem> ("Densities");
 	// Add a zeroth order monomial variable that will represent the densities
 	densities.add_variable("rho", CONSTANT, MONOMIAL);
+
+	// Declare the Elasticity system and its variables.
+	TopOptSystem& system = equation_systems.add_system<TopOptSystem> ("Elasticity");
+
 	// New system to compute the Von Mises stress
 	ExplicitSystem & vonmises_system = equation_systems.add_system<ExplicitSystem> ("VonMises");
 	vonmises_system.add_variable("vonmises", CONSTANT, MONOMIAL);
 
 	// Add objective function in the boundary
-	ComplianceTraction compliancetractionqoi;
-	compliancetractionqoi.attach_flux_bc_function(&bc_function);
-	compliancetractionqoi.assemble_qoi_sides = true;
-	system.attach_qoi(&compliancetractionqoi);
-	// Make sure we get the contributions to the adjoint RHS from the sides
-	system.assemble_qoi_sides = true;
+//	ComplianceTraction compliancetractionqoi(&densities, &system);
+//	compliancetractionqoi.attach_flux_bc_function(&bc_function);
+//	compliancetractionqoi.assemble_qoi_sides = true;
+//	system.attach_advanced_qoi(&compliancetractionqoi);
+//	// Make sure we get the contributions to the adjoint RHS from the sides
+//	system.assemble_qoi_sides = true;
 	// Add a Neumann condition at the right side of the second element,
 	// the other tip of the L. Side ordering starts from zero on the lower side and goes counter clockwise
 	//mesh.boundary_info->add_side(1,1,1);
@@ -669,13 +670,13 @@ int main (int argc, char** argv)
 
 
 
-//	// Attach body force.
+	// Attach body force.
 //	system.attach_body_force(&body_force);
 //	Compliance complianceqoi;
 //
 //	complianceqoi.attach_body_force(&body_force);
 //
-//	system.attach_qoi( &complianceqoi );
+//	system.attach_advanced_qoi( &complianceqoi );
 
 
 
@@ -687,11 +688,12 @@ int main (int argc, char** argv)
 	qois.set_weight(0, 1.0);
 
 
-//	VonMisesPnorm vonmises(&densities,&system,&qois);
-//	system.p_norm_objectivefunction = true;
-//	system.attach_qoi(&vonmises);
-//
-//	p_norm_objectivefunction = true;
+
+	VonMisesPnorm vonmises(&densities,&system,&qois);
+	system.p_norm_objectivefunction = true;
+	system.attach_advanced_qoi(&vonmises);
+	p_norm_objectivefunction = true;
+	system.assemble_qoi_sides = false;
 
 
 
@@ -757,11 +759,11 @@ int main (int argc, char** argv)
 			*it = param.initial_density;
 
 
-		//system.update_kernel();
+		system.update_kernel();
 
 		// Transfer the value of the variables to the density field
 		// filter them if the boolean filter is true
-		bool filter = false;
+		bool filter = true;
 		system.transfer_densities(densities, mesh, x, filter);
 
 		// Solve system
@@ -801,10 +803,10 @@ int main (int argc, char** argv)
 //		// Now that we have solved the adjoint, set the adjoint_already_solved boolean to true, so we dont solve unneccesarily in the error estimator
 		system.set_adjoint_already_solved(true);
 //
-		system.finite_differences_check(&densities,qois,sensitivities,system.get_parameter_vector());
-////
-////
-		system.finite_differences_partial_derivatives_check(qois,system.get_parameter_vector(),sensitivities, p_norm_objectivefunction);
+//		system.finite_differences_check(&densities,qois,sensitivities,system.get_parameter_vector());
+////////
+////////
+//		system.finite_differences_partial_derivatives_check(qois,system.get_parameter_vector(),sensitivities, p_norm_objectivefunction);
 
 //		// Number of variables for the optimizer, equal to the number of active elements, changes with each refinement
 //		dof_id_type n_variables = mesh.n_active_elem();
@@ -873,7 +875,7 @@ int main (int argc, char** argv)
 
 		              // Build an error estimator object
 		              AutoPtr<ErrorEstimator> error_estimator =
-		                build_error_estimator(param);
+		                build_error_estimator(param,system);
 
 
 		              // Estimate the error in each element using the Adjoint Residual or Kelly error estimator

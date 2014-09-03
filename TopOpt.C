@@ -29,13 +29,15 @@
 #include "libmesh/explicit_system.h"
 #include "libmesh/equation_systems.h"
 
+#include "libmesh/mesh_function.h"
+
 
 
 // Local includes
 #include "TopOpt.h"
 #include "resder.h"
 #include <math.h>
-#include "vonmises.h"
+
 
 // Bring in everything from the libMesh namespace
 using namespace libMesh;
@@ -348,14 +350,15 @@ void TopOptSystem::init_data ()
 
 	// Set initial values of the parameters to 0.5
 
+	ExplicitSystem & densities = this->get_equation_systems().get_system<ExplicitSystem>("Densities");
 
 	this->init_bcs();
 
-    densities_filtered.init(this->get_mesh().n_active_elem(), this->get_mesh().n_active_elem());
+    densities_filtered.init(*densities.solution.get());
 
-    gradient_filtered.init(this->get_mesh().n_active_elem(), this->get_mesh().n_active_elem());
+    gradient_filtered.init(*densities.solution.get());
 
-    gradient_filtered_temp.init(this->get_mesh().n_active_elem(), this->get_mesh().n_active_elem());
+    gradient_filtered_temp.init(*densities.solution.get());
 
 	// Add the kernel matrix
 
@@ -685,6 +688,7 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 	// J^T * z = (partial q / partial u)
 	// if we havent already or dont have an initial condition for the adjoint
 
+	this->diff_qoi = advanced_qoi[0];
 	if (!this->is_adjoint_already_solved())
 	{
 	  this->adjoint_solve(qoi_indices);
@@ -724,6 +728,22 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 
 	std::vector<Number> partialq_partialp(Np);
 	std::cout<<"Adjoint Analysis"<<std::endl;
+
+	// Our vector that accounts for the residual derivative is serial (we need one per element)
+	// but the adjoint vector is parallel, we need to get a serial copy to perform the dot product between them
+	AutoPtr<NumericVector<Number> > local_copy_adjoint_soln = NumericVector<Number>::build(get_equation_systems().comm());
+	std::vector<Number> adjoint_soln;
+	adjoint_soln.resize (this->get_adjoint_solution(0).size());
+	// Get copy into adjoint_soln vector
+	this->get_adjoint_solution(0).localize(adjoint_soln);
+	// Build serial petsc vector
+	local_copy_adjoint_soln->init(this->solution->size(), true, SERIAL);
+	// Copy the contents from adjoint_soln
+	(*local_copy_adjoint_soln) = adjoint_soln;
+
+
+
+
 	for (; el != end_el; el++)
 	{
 		const Elem * elem = *el;
@@ -777,13 +797,10 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 		// Here we calculate (partial R / partial p) using our built in function and we'll compare later.
 		this->assemble_res_derivative (qoi_indices, densities_index[0]);
 		// Calculate dQ/dP for this parameter
-		if (p_norm_objectivefunction){
-			_femcontext.elem_fe_reinit();
-			VonMisesPnorm * vonmises = (VonMisesPnorm *) this->get_qoi();
-			Number parameter_derivative;
-			vonmises->element_qoi_derivative_parameter(*con,parameter_derivative,density[0]);
-			partialq_partialp[densities_index[0]] = parameter_derivative;
-		}
+		unsigned int indice = 0;
+		Number parameter_derivative;
+		_femcontext.elem_fe_reinit();
+		advanced_qoi[indice]->element_qoi_derivative_parameter(*con,parameter_derivative,density[0]);
 
 //		std::cout<<"Partial derivative with analytical"<<std::endl;
 //		this->get_resder_rhs(0).print();
@@ -806,9 +823,9 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 //				  partialR_partialp->dot(*lift_func) -
 //				  partialR_partialp->dot(this->get_adjoint_solution(i));
 
-				sensitivities[i][densities_index[0]] = partialq_partialp[densities_index[0]] -
+				sensitivities[i][densities_index[0]] = parameter_derivative -
 					this->get_resder_rhs(0).dot(*lift_func) -
-					this->get_resder_rhs(0).dot(this->get_adjoint_solution(i));
+					this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
 				}
 				else{
 //				sensitivities[i][densities_index[0]] = partialq_partialp[i] -
@@ -818,8 +835,8 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 //				std::cout<<sensitivities[i][densities_index[0]]<<std::endl;
 
 
-				sensitivities[i][densities_index[0]] = partialq_partialp[densities_index[0]] -
-				this->get_resder_rhs(0).dot(this->get_adjoint_solution(i));
+				sensitivities[i][densities_index[0]] = parameter_derivative -
+				this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
 
 //				std::cout<<"Sensitivities with analytical"<<std::endl;
 //				std::cout<<sensitivities[i][densities_index[0]]<<std::endl;
@@ -830,6 +847,7 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 	// Sensitivities have been calculated
 	sensitivities_calculated = true;
 
+
 	// All parameters have been reset.
 	// We didn't cache the original rhs or matrix for memory reasons,
 	// but we can restore them to a state consistent solution -
@@ -839,7 +857,6 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 	//this->assembly(true, true);
 	this->rhs->close();
 	this->matrix->close();
-	this->assemble_qoi(qoi_indices);
 }
 
 void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&          qoi_indices,
@@ -876,10 +893,7 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 	// J^T * z = (partial q / partial u)
 	// if we havent already or dont have an initial condition for the adjoint
 
-	if (!this->is_adjoint_already_solved())
-	{
-	  this->adjoint_solve(qoi_indices);
-	}
+	this->diff_qoi = advanced_qoi[0];
 
 	// Get ready to fill in senstivities:
 	sensitivities.allocate_data(qoi_indices, *this, parameters);
@@ -908,7 +922,7 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 	// dq/dp = (partial q / partial p) - (z+phi) * (partial R / partial p)
 
 	MeshBase::const_element_iterator       el     = this->get_mesh().active_local_elements_begin();
-	const MeshBase::const_element_iterator end_el = this->get_mesh().active_local_elements_end();
+	MeshBase::const_element_iterator end_el = this->get_mesh().active_local_elements_end();
 
 	dof_id_type n_variables = this->get_mesh().n_active_elem();
 	std::vector<std::vector<Number> > partialq_partialp;
@@ -917,7 +931,7 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 	std::vector<std::vector<Number> > partialq_partialp_num;
 	partialq_partialp_num.resize(Nq);
 
-    AutoPtr<DiffContext> con = this->build_context();
+	AutoPtr<DiffContext> con = this->build_context();
     FEMContext &_femcontext = libmesh_cast_ref<FEMContext&>(*con);
     this->get_qoi()->init_context(_femcontext);
 
@@ -926,173 +940,355 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 		partialq_partialp_num[i].resize(n_variables);
 	}
 
+	for (unsigned int k=0; k<this->n_processors(); k++){
+		for (; el != end_el; el++)
+		{
+			const Elem * elem = *el;
 
-	for (; el != end_el; el++)
-	{
-		const Elem * elem = *el;
+			_femcontext.pre_fe_reinit(*this, elem);
 
-		_femcontext.pre_fe_reinit(*this, elem);
+			// (partial q / partial p) ~= (q(p+dp)-q(p-dp))/(2*dp)
+			// (partial R / partial p) ~= (rhs(p+dp) - rhs(p-dp))/(2*dp)
+			// Get dof indices
+			Number old_parameter;
+			const Real delta_p = 1e-6;
 
-		// (partial q / partial p) ~= (q(p+dp)-q(p-dp))/(2*dp)
-		// (partial R / partial p) ~= (rhs(p+dp) - rhs(p-dp))/(2*dp)
-		// Get dof indices
-		dof_map_densities.dof_indices(elem, densities_index, density_var);
-		// Get the value, stored in density
-		aux_system.current_local_solution->get(densities_index, density);
+			dof_map_densities.dof_indices(elem, densities_index, density_var);
+			// Get the value, stored in density
+			aux_system.current_local_solution->get(densities_index, density);
+			if (k == this->processor_id()) {
+				// We currently get partial derivatives via central differencing
+				old_parameter = density[0];
+				Number parameter_back = old_parameter - delta_p;
+				aux_system.current_local_solution->set(densities_index[0],parameter_back);
+			}
+			this->comm().barrier();
+			aux_system.current_local_solution->close();
+			this->assemble_qoi(qoi_indices);
+			std::vector<Number> qoi_minus = this->qoi;
+			if (p_norm_objectivefunction){
+				for (unsigned int k=0 ; k!=qoi.size(); k++)
+					qoi_minus[k]= pow(qoi_minus[k], 1.0/pnorm_parameter);
+			}
 
-		/*------------- THIS IS NO LONGER NECESSARY, DELETE AT SOME POINT -----------------------*/
-		// We currently get partial derivatives via central differencing
-		const Real delta_p = 1e-6;
-		Number old_parameter = density[0];
-		Number parameter_back = old_parameter - delta_p;
-		aux_system.current_local_solution->set(densities_index[0],parameter_back);
-		aux_system.current_local_solution->close();
-		this->assemble_qoi(qoi_indices);
-		std::vector<Number> qoi_minus = this->qoi;
-		if (p_norm_objectivefunction){
-			for (unsigned int k=0 ; k!=qoi.size(); k++)
-				qoi_minus[k]= pow(qoi_minus[k], 1.0/pnorm_parameter);
-		}
+			this->assembly(true, false);
+			this->rhs->close();
 
-		this->assembly(true, false);
-		this->rhs->close();
+			// FIXME - this can and should be optimized to avoid the clone()
+			AutoPtr<NumericVector<Number> > partialR_partialp = this->rhs->clone();
+			*partialR_partialp *= -1;
 
-		// FIXME - this can and should be optimized to avoid the clone()
-		AutoPtr<NumericVector<Number> > partialR_partialp = this->rhs->clone();
-		*partialR_partialp *= -1;
-
-		Number parameter_forward = old_parameter + delta_p;
-		aux_system.current_local_solution->set(densities_index[0],parameter_forward);
-		aux_system.current_local_solution->close();
-		this->assemble_qoi(qoi_indices);
-		std::vector<Number>& qoi_plus = this->qoi;
-		if (p_norm_objectivefunction){
-			for (unsigned int k=0 ; k!=qoi.size(); k++)
-				qoi_plus[k]= pow(qoi_plus[k], 1.0/pnorm_parameter);
-		}
+			Number parameter_forward = old_parameter + delta_p;
+			if (k == this->processor_id()) {
+				aux_system.current_local_solution->set(densities_index[0],parameter_forward);
+			}
+			this->comm().barrier();
+			aux_system.current_local_solution->close();
+			this->assemble_qoi(qoi_indices);
+			std::vector<Number>& qoi_plus = this->qoi;
+			if (p_norm_objectivefunction){
+				for (unsigned int k=0 ; k!=qoi.size(); k++)
+					qoi_plus[k]= pow(qoi_plus[k], 1.0/pnorm_parameter);
+			}
 
 
-		for (unsigned int i=0; i != Nq; ++i)
-		if (qoi_indices.has_index(i))
-			partialq_partialp_num[i][densities_index[0]] = (qoi_plus[i] - qoi_minus[i]) / (2.*delta_p);
+			if (k == this->processor_id()) {
+				for (unsigned int i=0; i != Nq; ++i)
+					if (qoi_indices.has_index(i))
+						partialq_partialp_num[i][densities_index[0]] = (qoi_plus[i] - qoi_minus[i]) / (2.*delta_p);
+			}
+			this->comm().barrier();
 
-		this->assembly(true, false);
-		this->rhs->close();
-		*partialR_partialp += *this->rhs;
-		*partialR_partialp /= (2.*delta_p);
 
-		// Don't leave the parameter changed
-		aux_system.current_local_solution->set(densities_index[0],old_parameter);
-		aux_system.current_local_solution->close();
-		/*------------- THIS IS NO LONGER NECESSARY, DELETE AT SOME POINT -----------------------*/
+			this->assembly(true, false);
+			this->rhs->close();
+			*partialR_partialp += *this->rhs;
+			*partialR_partialp /= (2.*delta_p);
 
-		// Calculate dQ/dP for this parameter
-		if (p_norm_objectivefunction){
-			_femcontext.elem_fe_reinit();
-			VonMisesPnorm * vonmises = (VonMisesPnorm *) this->get_qoi();
+			// Don't leave the parameter changed
+			if (k == this->processor_id()) {
+				aux_system.current_local_solution->set(densities_index[0],old_parameter);
+			}
+			this->comm().barrier();
+			aux_system.current_local_solution->close();
+
+			// Calculate dQ/dP for this parameter
+	//		if (p_norm_objectivefunction){
+	//			_femcontext.elem_fe_reinit();
+	//			VonMisesPnorm * vonmises = (VonMisesPnorm *) this->get_qoi();
+	//			Number parameter_derivative;
+	//			vonmises->element_qoi_derivative_parameter(*con,parameter_derivative,density[0]);
+	//			partialq_partialp[0][densities_index[0]] = parameter_derivative;
+	//		}
+			std::cout<<"hanging"<<std::endl;
+			// Here we calculate (partial R / partial p) using our built in function and we'll compare later.
+
+			this->assemble_res_derivative (qoi_indices, densities_index[0]);
+
+			std::cout<<"hanging"<<std::endl;
+			this->comm().barrier();
+
+			std::cout<<"dR/dP with analytical for element = "<<densities_index[0]<<std::endl;
+			this->get_resder_rhs(0).print();
+
+			std::cout<<"dR/dP with FD for element ="<<densities_index[0]<<std::endl;
+			partialR_partialp->print_global();
+
+			// Calculate dQ/dP for this parameter
+			unsigned int indice = 0;
 			Number parameter_derivative;
-			vonmises->element_qoi_derivative_parameter(*con,parameter_derivative,density[0]);
-			partialq_partialp[0][densities_index[0]] = parameter_derivative;
+			_femcontext.set_elem(elem);
+			_femcontext.elem_fe_reinit();
+			advanced_qoi[indice]->element_qoi_derivative_parameter(*con,parameter_derivative,density[0]);
+
+
+			std::cout<<"dQ/dP with FD  -----  dQ/dP with analytical for element ="<<densities_index[0]<<std::endl;
+			if (k == this->processor_id()) {
+				for (unsigned int i=0; i != Nq; ++i) {
+					if (qoi_indices.has_index(i))
+					std::cout<<partialq_partialp_num[i][densities_index[0]]<<"   		     "<<parameter_derivative<<std::endl;
+				}
+			}
+			this->comm().barrier();
 		}
-
-		// Here we calculate (partial R / partial p) using our built in function and we'll compare later.
-
-		this->assemble_res_derivative (qoi_indices, densities_index[0]);
-
-		std::cout<<"dR/dP with analytical for element = "<<densities_index[0]<<std::endl;
-		this->get_resder_rhs(0).print();
-
-		std::cout<<"dR/dP with FD for element ="<<densities_index[0]<<std::endl;
-		partialR_partialp->print();
-		std::cout<<"dQ/dP with FD  -----  dQ/dP with analytical for element ="<<densities_index[0]<<std::endl;
-		for (unsigned int i=0; i != Nq; ++i) {
-			if (qoi_indices.has_index(i))
-			std::cout<<partialq_partialp[i][densities_index[0]]<<"   		     "<<partialq_partialp_num[i][densities_index[0]]<<std::endl;
-		}
+		this->comm().barrier();
 	}
 
 	std::cout << "Terminamos este FD check" << std::endl;
 
-	  // The quantity of interest derivative assembly accumulates on
-	  // initially zero vectors
-//	  for (unsigned int i=0; i != qoi.size(); ++i)
-//	    if (qoi_indices.has_index(i))
-//	      this->add_dqdu_fd(i).zero();
-//
-//	  std::ostringstream dqdu_fd_name;
-//	  dqdu_fd_name << "dqdu_fd" << 0;
-//	  this->set_vector_preservation(dqdu_fd_name.str(),true);
+
 
 	  std::cout << "Empezamos este FD check" << std::endl;
-	  MeshBase::node_iterator node_begin = this->get_mesh().local_nodes_begin();
-	  MeshBase::node_iterator node_end = this->get_mesh().local_nodes_end();
 
-		for (unsigned int j=0; j != qoi.size(); ++j)
-			for (; node_begin != node_end; ++node_begin){
-				const Node * nodo = *node_begin;
-				unsigned int sys_num = this->number();
-				unsigned int u_var = this->variable_number ("u");
-				unsigned int n_components = nodo->n_comp(sys_num,u_var);
+	  // Dof Map for the elasticity system
+	  const DofMap& dof_map_elasticity = this->get_dof_map();
 
-				for (unsigned int k = 0; k<n_components; k++){
 
-					unsigned int i = nodo->dof_number(sys_num, u_var, k);
-					std::cout << "dof = "<<i<< std::endl;
+	  unsigned int sys_num = this->number();
+	  unsigned int u_var = this->variable_number ("u");
+
+	  // First we create a local copy of the entire solution vector
+	  AutoPtr<NumericVector<Number> > local_copy_global_soln = NumericVector<Number>::build(get_equation_systems().comm());
+	  AutoPtr<NumericVector<Number> > local_copy_global_density = NumericVector<Number>::build(get_equation_systems().comm());
+	  AutoPtr<NumericVector<Number> > partialQ_partialU = NumericVector<Number>::build(get_equation_systems().comm());
+	  // Transfer global solution to a vector
+	  std::vector<Number> global_soln, global_densities;
+	  this->update_global_solution(global_soln);
+	  aux_system.update_global_solution(global_densities);
+	  // Copy the contents into a NumericVector
+	  local_copy_global_soln->init(this->solution->size(), true, SERIAL);
+	  (*local_copy_global_soln) = global_soln;
+
+	  local_copy_global_density->init(aux_system.solution->size(), true, SERIAL);
+	  (*local_copy_global_density) = global_densities;
+
+	  partialQ_partialU->init(this->solution->size(), true, SERIAL);
+
+	  partialQ_partialU->zero();
+
+
+	  this->get_mesh().allgather();
+	  el     = this->get_mesh().active_elements_begin();
+	  end_el = this->get_mesh().active_elements_end();
+
+	  MeshBase::const_element_iterator       el_qoi     = this->get_mesh().active_elements_begin();
+	  MeshBase::const_element_iterator       end_el_qoi = this->get_mesh().active_elements_end();
+
+	  if (this->processor_id() == 0){
+		for (unsigned int qoi_index=0; qoi_index != qoi.size(); ++qoi_index){
+			for (; el != end_el; el++){
+
+
+				const Elem * elem = *el;
+				unsigned int elem_n_dofs = elem->n_dofs(sys_num,u_var);
+				// Grab the dof indices for this element (global degree of freedom)
+				std::vector<dof_id_type> indices;
+				dof_map_elasticity.dof_indices(elem,indices,u_var);
+
+
+
+				for (unsigned int i = 0; i < indices.size(); ++i){
 					const Real delta_p = 1e-6;
-
-					Number old_parameter = this->solution->operator ()(i);
+					Number old_parameter = (*local_copy_global_soln)(indices[i]);
 					Number parameter_back = old_parameter - delta_p;
 
-//					this->solution->set(i,parameter_back);
-//					this->solution->close();
+					local_copy_global_soln->set(indices[i],parameter_back);
+					local_copy_global_soln->close();
 
-					this->assemble_qoi(qoi_indices);
 
-					std::vector<Number> qoi_minus = this->qoi;
+					Number qoi_minus = 0.0;
+
+					el_qoi     = this->get_mesh().active_elements_begin();
+
+					for (; el_qoi != end_el_qoi; el_qoi++){
+						// Initialize context
+
+						_femcontext.set_elem(*el_qoi);
+
+						_femcontext.elem_fe_reinit();
+
+
+						Number qoi_minus_elem = 0.0;
+						this->advanced_qoi[qoi_index]->element_qoi_for_FD(local_copy_global_soln,
+																			local_copy_global_density,
+																			*el_qoi,
+																			_femcontext,
+																			qoi_minus_elem);
+
+						Number qoi_minus_side = 0.0;
+				        for (_femcontext.side = 0;
+				        		_femcontext.side != _femcontext.get_elem().n_sides();
+				             ++_femcontext.side)
+				          {
+				            // Don't compute on non-boundary sides unless requested
+				            if (!this->advanced_qoi[qoi_index]->assemble_qoi_sides ||
+				                (!this->advanced_qoi[qoi_index]->assemble_qoi_internal_sides &&
+				                		_femcontext.get_elem().neighbor(_femcontext.side) != NULL))
+				              continue;
+
+				            _femcontext.side_fe_reinit();
+
+
+							this->advanced_qoi[qoi_index]->element_qoi_for_FD(local_copy_global_soln,
+																				local_copy_global_density,
+																				*el_qoi,
+																				_femcontext,
+																				qoi_minus_side);
+				          }
+						qoi_minus += qoi_minus_elem + qoi_minus_side;
+					}
+
 					if (p_norm_objectivefunction){
-						for (unsigned int k=0 ; k!=qoi.size(); k++)
-							qoi_minus[k]= pow(qoi_minus[k], 1.0/pnorm_parameter);
+							qoi_minus= pow(qoi_minus, 1.0/pnorm_parameter);
 					}
 
 
 					Number parameter_forward = old_parameter + delta_p;
-//					this->solution->set(i,parameter_forward);
-//					this->solution->close();
+					local_copy_global_soln->set(indices[i],parameter_forward);
+					local_copy_global_soln->close();
 
-					this->assemble_qoi(qoi_indices);
-					std::vector<Number>  qoi_plus = this->qoi;
+					Number qoi_plus = 0.0;
+
+					// Reinit the iterator
+					el_qoi     = this->get_mesh().active_elements_begin();
+					for (; el_qoi != end_el_qoi; el_qoi++){
+
+						// Initialize context
+						_femcontext.set_elem(*el_qoi);
+						_femcontext.elem_fe_reinit();
+
+						Number qoi_plus_elem = 0.0;
+						this->advanced_qoi[qoi_index]->element_qoi_for_FD(local_copy_global_soln,
+																			local_copy_global_density,
+																			*el_qoi,
+																			_femcontext,
+																			qoi_plus_elem);
+
+						Number qoi_plus_side = 0.0;
+				        for (_femcontext.side = 0;
+				        		_femcontext.side != _femcontext.get_elem().n_sides();
+				             ++_femcontext.side)
+				          {
+				            // Don't compute on non-boundary sides unless requested
+				            if (!this->advanced_qoi[qoi_index]->assemble_qoi_sides ||
+				                (!this->advanced_qoi[qoi_index]->assemble_qoi_internal_sides &&
+				                		_femcontext.get_elem().neighbor(_femcontext.side) != NULL))
+				              continue;
+
+				            _femcontext.side_fe_reinit();
+
+							this->advanced_qoi[qoi_index]->element_qoi_for_FD(local_copy_global_soln,
+																				local_copy_global_density,
+																				*el_qoi,
+																				_femcontext,
+																				qoi_plus_side);
+				          }
+						qoi_plus += qoi_plus_elem + qoi_plus_side;
+					}
+
 					if (p_norm_objectivefunction){
-						for (unsigned int k=0 ; k!=qoi.size(); k++)
-							qoi_plus[k]= pow(qoi_plus[k], 1.0/pnorm_parameter);
+						qoi_plus= pow(qoi_plus, 1.0/pnorm_parameter);
 					}
 
 					// Evaluate partial derivative
-					Number dQdU = (qoi_plus[j] - qoi_minus[j]) / (2.*delta_p);
+					Number dQdU = (qoi_plus - qoi_minus) / (2.*delta_p);
 
-					// Set it
-					//this->get_dqdu_fd(j).set(i,dQdU);
+
+					//Set it
+					partialQ_partialU->set(indices[i],dQdU);
 
 					// Modify solution back to its original
-//					this->solution->set(i, old_parameter);
-//					this->solution->close();
-
+					local_copy_global_soln->set(indices[i],old_parameter);
+					local_copy_global_soln->close();
 				}
-
 			}
+		}
+	  }
+	  this->get_mesh().delete_remote_elements();
+
+//		for (unsigned int j=0; j != qoi.size(); ++j)
+//			for (; node_begin != node_end; ++node_begin){
+//				const Node * nodo = *node_begin;
+//				unsigned int sys_num = this->number();
+//				unsigned int u_var = this->variable_number ("u");
+//				unsigned int n_components = nodo->n_comp(sys_num,u_var);
+//
+//				for (unsigned int k = 0; k<n_components; k++){
+//
+//					unsigned int i = nodo->dof_number(sys_num, u_var, k);
+//					std::cout << "dof = "<<i<< std::endl;
+//					const Real delta_p = 1e-6;
+//
+//					Number old_parameter = this->current_solution(i);
+//					Number parameter_back = old_parameter - delta_p;
+//
+//					this->current_local_solution->set(i,parameter_back);
+//					this->current_local_solution->close();
+//
+//					this->assemble_qoi(qoi_indices);
+//
+//					std::vector<Number> qoi_minus = this->qoi;
+//					if (p_norm_objectivefunction){
+//						for (unsigned int k=0 ; k!=qoi.size(); k++)
+//							qoi_minus[k]= pow(qoi_minus[k], 1.0/pnorm_parameter);
+//					}
+//
+//
+//					Number parameter_forward = old_parameter + delta_p;
+//					this->current_local_solution->set(i,parameter_forward);
+//					this->current_local_solution->close();
+//
+//					this->assemble_qoi(qoi_indices);
+//					std::vector<Number>  qoi_plus = this->qoi;
+//					if (p_norm_objectivefunction){
+//						for (unsigned int k=0 ; k!=qoi.size(); k++)
+//							qoi_plus[k]= pow(qoi_plus[k], 1.0/pnorm_parameter);
+//					}
+//
+//					// Evaluate partial derivative
+//					Number dQdU = (qoi_plus[j] - qoi_minus[j]) / (2.*delta_p);
+//
+//					// Set it
+//					//this->get_dqdu_fd(j).set(i,dQdU);
+//
+//					// Modify solution back to its original
+//					this->current_local_solution->set(i, old_parameter);
+//					this->current_local_solution->close();
+//
+//				}
+//
+//			}
 		std::cout << "Terminamos FD check partial" << std::endl;
 	// Close vectors for reuse
-//	for (unsigned int i=0; i != qoi.size(); ++i)
-//		if (qoi_indices.has_index(i))
-//			this->get_dqdu_fd(i).close();
+	partialQ_partialU->close();
 
 
 	std::cout<<"dQ/dU with analytical"<<std::endl;
-	this->get_adjoint_rhs(0).print();
+
+	this->get_adjoint_rhs(0).print_global();
 
 	std::cout<<"dQ/dU with FD"<<std::endl;
-//	for (unsigned int i=0; i != qoi.size(); ++i)
-//		if (qoi_indices.has_index(i))
-//			this->get_dqdu_fd(i).print();
+	partialQ_partialU->print();
 
 	std::cout << "Terminamos FD check" << std::endl;
 
@@ -1110,7 +1306,7 @@ NumericVector<Number> & TopOptSystem::add_resder_rhs (unsigned int i)
   std::ostringstream resder_rhs_name;
   resder_rhs_name << "res_der" << i;
 
-  return this->add_vector(resder_rhs_name.str(), false, GHOSTED);
+  return this->add_vector(resder_rhs_name.str(), false, SERIAL);
 }
 
 NumericVector<Number> & TopOptSystem::get_resder_rhs (unsigned int i)
@@ -1119,22 +1315,6 @@ NumericVector<Number> & TopOptSystem::get_resder_rhs (unsigned int i)
 	  resder_rhs_name << "res_der" << i;
 
   return this->get_vector(resder_rhs_name.str());
-}
-
-NumericVector<Number> & TopOptSystem::add_dqdu_fd (unsigned int i)
-{
-  std::ostringstream dqdu_fd_name;
-  dqdu_fd_name << "dqdu_fd" << i;
-
-  return this->add_vector(dqdu_fd_name.str(), false, GHOSTED);
-}
-
-NumericVector<Number> & TopOptSystem::get_dqdu_fd (unsigned int i)
-{
-  std::ostringstream dqdu_fd_name;
-  dqdu_fd_name << "dqdu_fd" << i;
-
-  return this->get_vector(dqdu_fd_name.str());
 }
 
 void TopOptSystem::assemble_res_derivative (const QoISet& qoi_indices, const dof_id_type & elem_id)
@@ -1169,6 +1349,7 @@ void TopOptSystem::calculate_qoi(const QoISet &qoi_indices)
   // Reset the array holding the computed QoIs
   computed_QoI[0] = 0.0;
 
+  this->diff_qoi = advanced_qoi[0];
   FEMSystem::assemble_qoi(qoi_indices);
   std::vector<Number> qoi = this->qoi;
 
@@ -1211,55 +1392,73 @@ void TopOptSystem::finite_differences_check(ExplicitSystem * densities,
 
 
 	std::cout<<"Comparing global sensitivities with Finite Differences"<<std::endl;
-	for (; el != end_el; el++)
-	{
-		const Elem * elem = *el;
-		std::vector<Number> partialq_partialp(Nq, 0);
-		// (partial q / partial p) ~= (q(p+dp)-q(p-dp))/(2*dp)
-		// Get dof indices
-		dof_map_densities.dof_indices(elem, densities_index, density_var);
-		// Get the value, stored in density
-		aux_system.current_local_solution->get(densities_index, density);
 
-		Number old_parameter = density[0];
-		Number parameter_back = old_parameter - delta_p;
-		aux_system.current_local_solution->set(densities_index[0],parameter_back);
-		aux_system.current_local_solution->close();
-		// Solve system to obtain the new QoI
-		this->solve();
-		// Calculate perturbed QoI
-		this->assemble_qoi(qois);
-		std::vector<Number> qoi_minus = this->qoi;
-		if (p_norm_objectivefunction){
-			for (unsigned int k=0 ; k!=qoi.size(); k++)
-				qoi_minus[k]= pow(qoi_minus[k], 1.0/pnorm_parameter);
-		}
+	for (unsigned int i=0; i<this->n_processors(); i++){
+			for (; el != end_el; el++)
+			{
+				const Elem * elem = *el;
+				std::vector<Number> partialq_partialp(Nq, 0);
+				// (partial q / partial p) ~= (q(p+dp)-q(p-dp))/(2*dp)
+				// Get dof indices
+				Number old_parameter;
+				if (i == this->processor_id()) {
+					dof_map_densities.dof_indices(elem, densities_index, density_var);
+					// Get the value, stored in density
+					aux_system.current_local_solution->get(densities_index, density);
 
-		Number parameter_forward = old_parameter + delta_p;
-		aux_system.current_local_solution->set(densities_index[0],parameter_forward);
-		aux_system.current_local_solution->close();
-		// Solve system to obtain the new QoI
-		this->solve();
-		// Calculate perturbed QoI
-		this->assemble_qoi(qois);
-		std::vector<Number>& qoi_plus = this->qoi;
-		if (p_norm_objectivefunction){
-			for (unsigned int k=0 ; k!=qoi.size(); k++)
-				qoi_plus[k]= pow(qoi_plus[k], 1.0/pnorm_parameter);
-		}
+					old_parameter = density[0];
+					Number parameter_back = old_parameter - delta_p;
+					aux_system.current_local_solution->set(densities_index[0],parameter_back);
+				}
+				this->comm().barrier();
+				aux_system.current_local_solution->close();
+				// Solve system to obtain the new QoI
+				this->solve();
+				// Calculate perturbed QoI
+				this->assemble_qoi(qois);
+				std::vector<Number> qoi_minus = this->qoi;
+				if (p_norm_objectivefunction){
+					for (unsigned int k=0 ; k!=qoi.size(); k++)
+						qoi_minus[k]= pow(qoi_minus[k], 1.0/pnorm_parameter);
+				}
 
-		// Don't leave the parameter changed
-		aux_system.current_local_solution->set(densities_index[0],old_parameter);
-		aux_system.current_local_solution->close();
+				Number parameter_forward = old_parameter + delta_p;
 
+				if (i == this->processor_id()) {
+					aux_system.current_local_solution->set(densities_index[0],parameter_forward);
+				}
+				this->comm().barrier();
+				aux_system.current_local_solution->close();
+				// Solve system to obtain the new QoI
+				this->solve();
+				// Calculate perturbed QoI
+				this->assemble_qoi(qois);
+				std::vector<Number>& qoi_plus = this->qoi;
+				if (p_norm_objectivefunction){
+					for (unsigned int k=0 ; k!=qoi.size(); k++)
+						qoi_plus[k]= pow(qoi_plus[k], 1.0/pnorm_parameter);
+				}
 
-		std::cout<<"Sensitivities with FD  -----  Sensitivities with analytical"<<std::endl;
-		for (unsigned int i=0; i != Nq; ++i) {
-			if (qois.has_index(i))
-				sensitivities_fd[i][densities_index[0]] = (qoi_plus[i] - qoi_minus[i]) / (2.*delta_p);
+				if (i == this->processor_id()) {
+					// Don't leave the parameter changed
+					aux_system.current_local_solution->set(densities_index[0],old_parameter);
+				}
+				this->comm().barrier();
+				aux_system.current_local_solution->close();
 
-			std::cout<<sensitivities_fd[i][densities_index[0]]<<"   		     "<<sensitivities[i][densities_index[0]]<<std::endl;
-		}
+				std::cout<<"Sensitivities with FD  -----  Sensitivities with analytical"<<std::endl;
+				if (i == this->processor_id()) {
+					for (unsigned int i=0; i != Nq; ++i) {
+						if (qois.has_index(i))
+							sensitivities_fd[i][densities_index[0]] = (qoi_plus[i] - qoi_minus[i]) / (2.*delta_p);
+
+						std::cout<<sensitivities_fd[i][densities_index[0]]<<"   		     "<<sensitivities[i][densities_index[0]]<<std::endl;
+					}
+				}
+				this->comm().barrier();
+			}
+		this->comm().barrier();
+
 
 	}
 
@@ -1267,49 +1466,24 @@ void TopOptSystem::finite_differences_check(ExplicitSystem * densities,
 }
 
 void TopOptSystem::transfer_densities(ExplicitSystem & densities, const MeshBase & mesh, const std::vector<double> & x, const bool & filter){
-	std::vector<dof_id_type> density_index;
-	const DofMap& dof_map_densities = densities.get_dof_map();
 
-	unsigned int density_var = densities.variable_number ("rho");
-
-	MeshBase::const_element_iterator       el     = mesh.active_local_elements_begin();
-	const MeshBase::const_element_iterator end_el = mesh.active_local_elements_end();
-
-	for ( ; el != end_el; ++el){
-		const Elem* elem = *el;
-		dof_map_densities.dof_indices (elem, density_index, density_var);
-
-		// We are using CONSTANT MONOMIAL basis functions, hence we only need to get
-		// one dof index per variable
-		dof_id_type dof_index = density_index[0];
-
-		if( (densities.solution->first_local_index() <= dof_index) &&
-				(dof_index < densities.solution->last_local_index()) )
-			densities.solution->set(dof_index, x[dof_index]);
-	}
-
+	// First, we need to transfer the densities from the solution to the global solution
+	// vector in the densities system. Because x hsa the same size than the global vector,
+	// only the local components are copied.
+	*(densities.solution) = x;
 	// Should call close and update when we set vector entries directly
 	densities.solution->close();
 	densities.update();
 
+	// Copy them back to the original densities field
+
 	if (filter){
 		// Apply filter
-		kernel_filter.vector_mult(densities_filtered, *densities.solution.get());
+		kernel_filter_parallel.vector_mult(densities_filtered, *densities.solution.get());
 
 		// Copy them back to densities solution
-		el     = mesh.active_local_elements_begin();
-		for ( ; el != end_el; ++el){
-			const Elem* elem = *el;
-			dof_map_densities.dof_indices (elem, density_index, density_var);
 
-			// We are using CONSTANT MONOMIAL basis functions, hence we only need to get
-			// one dof index per variable
-			dof_id_type dof_index = density_index[0];
-
-			if( (densities.solution->first_local_index() <= dof_index) &&
-					(dof_index < densities.solution->last_local_index()) )
-				densities.solution->set(dof_index, densities_filtered(dof_index));
-		}
+		*(densities.solution) = densities_filtered;
 
 		// Should call close and update when we set vector entries directly
 		densities.solution->close();
@@ -1329,8 +1503,8 @@ void TopOptSystem::filter_gradient(const std::vector<Number> & gradient, Explici
 
 	gradient_filtered_temp.zero();
 
-	// Perform product of gradient_filtered_temp = (kernel_filter)^T * gradient_filtered (right now they're just the derivatives)
-	gradient_filtered_temp.add_vector_transpose(gradient_filtered, kernel_filter);
+	// Perform product of gradient_filtered_temp = (kernel_filter_parallel)^T * gradient_filtered (right now they're just the derivatives)
+	gradient_filtered_temp.add_vector_transpose(gradient_filtered, kernel_filter_parallel);
 
 	// The filtered gradient is gradient_filtered_temp, copy them back to the sensitivities
 	gradient_filtered_temp.localize(grad);
@@ -1380,32 +1554,24 @@ void TopOptSystem::update_kernel(){
 	MeshBase & mesh_parallel = this->get_mesh();
 	mesh_parallel.allgather();
 
-	MeshBase::const_element_iterator       el     = mesh_parallel.active_elements_begin();
-	const MeshBase::const_element_iterator end_el = mesh_parallel.active_elements_end();
-
-	std::cout<<"Printing every single element's centroid"<<std::endl;
-	for ( ; el != end_el ; ++el){
-		Elem * elem = *el;
-		Point p = elem->centroid();
-		std::cout<<p<<std::endl;
-	}
-
-	el     = mesh_parallel.active_elements_begin();
+	MeshBase::const_element_iterator       el     = mesh_parallel.active_local_elements_begin();
+	const MeshBase::const_element_iterator end_el = mesh_parallel.active_local_elements_end();
 
 	std::queue<const Elem*> queue_elements;
 
+	dof_id_type n_elements_kernel_local = mesh_parallel.n_active_local_elem();
 	dof_id_type n_elements_kernel = mesh_parallel.n_active_elem();
 
 	// Number of on-processor non-zeros per row
 	std::vector< numeric_index_type > n_nz, n_oz;
-	n_nz.resize(n_elements_kernel);
-	n_oz.resize(n_elements_kernel);
+	n_nz.resize(n_elements_kernel_local);
+	n_oz.resize(n_elements_kernel_local);
 	// Vector that contains an array of elements affected by the filter
 	// We access it with the density_current index to see all the elements
 	// affected by the filter on the density_current
 	// This way, we can quickly build the matrix in the second pass
 	std::vector<std::vector<const Elem*> > elements_array;
-	elements_array.resize(n_elements_kernel);
+	elements_array.resize(n_elements_kernel_local);
 	// Array to mark the visited elements
 	std::vector<bool> marked_elements;
 	marked_elements.resize(n_elements_kernel);
@@ -1415,6 +1581,13 @@ void TopOptSystem::update_kernel(){
 	// Array to hold the dof indices
 	std::vector<dof_id_type> density_neighbor;
 	std::vector<dof_id_type> density_current;
+
+	numeric_index_type first_local_index = aux_system.solution->first_local_index();
+	numeric_index_type last_local_index = aux_system.solution->last_local_index();
+
+
+	PetscVector<Number> * local_copy_global_density_auxiliar = (PetscVector<Number> *) aux_system.solution.get();
+
 
 	for ( ; el != end_el ; ++el){
 		std::fill(marked_elements.begin(),marked_elements.end(),false);
@@ -1426,10 +1599,14 @@ void TopOptSystem::update_kernel(){
 		// First, check the element by itself
 		// Density index gives us the column for the current row in the kernel matrix
 		// We have an additional non-zero for this row
-		++n_nz[density_current[0]];
+
+		// We need the local dof first
+		numeric_index_type local_element_dof = local_copy_global_density_auxiliar->map_global_to_local_index(density_current[0]);
+
+		++n_nz[local_element_dof];
 		// Mark it as visited
 		marked_elements[density_current[0]] = true;
-		elements_array[density_current[0]].push_back(elem);
+		elements_array[local_element_dof].push_back(elem);
 		// Calculate centroid
 		Point my_centroid = elem->centroid();
 		while (!queue_elements.empty()){
@@ -1463,9 +1640,15 @@ void TopOptSystem::update_kernel(){
 								queue_elements.push(f);
 								// Density index gives us the column for the current row in the kernel matrix
 								// We have an additional non-zero for this row
-								++n_nz[density_current[0]];
+								// We need to know whether this non-zero is in the processor or not,
+								// it depends on where the element is located in the solution vector
+								// of the densities system
+								if (density_neighbor[0] <= last_local_index && density_neighbor[0] >=first_local_index)
+									++n_nz[local_element_dof];
+								else
+									++n_oz[local_element_dof];
 								// Mark it as visited
-								elements_array[density_current[0]].push_back(f);
+								elements_array[local_element_dof].push_back(f);
 							}
 						}
 					}
@@ -1474,26 +1657,32 @@ void TopOptSystem::update_kernel(){
 		}
 	}
 
-
+	unsigned int local_size_matrix = aux_system.solution->local_size();
 	// Allocate memory in matrix
-	kernel_filter.init(n_elements_kernel,n_elements_kernel,n_elements_kernel,n_elements_kernel,n_nz,n_oz,1);
+	kernel_filter_parallel.init(n_elements_kernel,n_elements_kernel,local_size_matrix,local_size_matrix,n_nz,n_oz,1);
 	// Second pass
-	el     = mesh_parallel.active_elements_begin();
+	el     =  mesh_parallel.active_local_elements_begin();
 
-	kernel_filter.attach_dof_map(aux_system.get_dof_map());
+	kernel_filter_parallel.attach_dof_map(aux_system.get_dof_map());
 
 	for ( ; el != end_el ; ++el){
 		Elem * elem = *el;
 		// Get index, it will be the row number of our matrix
 		aux_system.get_dof_map().dof_indices(elem, density_current, 0);
 		// Row where our DenseMatrix row_vector will be in the filter kernel
+
+		// We need the local dof first
+		numeric_index_type local_element_dof = local_copy_global_density_auxiliar->map_global_to_local_index(density_current[0]);
+
 		std::vector<dof_id_type> rows, cols;
 		std::vector<Number> values_row;
 		rows.push_back(density_current[0]);
 
+
+
 		// Iterators
-		std::vector<const Elem *>::iterator el_kernel 		= elements_array[density_current[0]].begin();
-		std::vector<const Elem *>::iterator el_kernel_end	= elements_array[density_current[0]].end();
+		std::vector<const Elem *>::iterator el_kernel 		= elements_array[local_element_dof].begin();
+		std::vector<const Elem *>::iterator el_kernel_end	= elements_array[local_element_dof].end();
 
 		Point my_centroid = elem->centroid();
 		Number normalization_coeffient = 0;
@@ -1527,19 +1716,14 @@ void TopOptSystem::update_kernel(){
 		 */
 		// Normalize the row vector
 		row_vector *= 1.0/normalization_coeffient;
-		kernel_filter.add_matrix(row_vector,rows,cols);
+		kernel_filter_parallel.add_matrix(row_vector,rows,cols);
 	}
-	kernel_filter.close();
+	kernel_filter_parallel.close();
+
+	kernel_filter_parallel.print();
 
 	mesh_parallel.delete_remote_elements();
 
 	std::cout<<"Kernel finalized and built"<<std::endl;
-
-	kernel_filter.print_personal();
-
-	std::cout<<"Kernel printed"<<std::endl;
-
-
-
 
 }

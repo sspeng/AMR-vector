@@ -42,6 +42,22 @@ void FEMParameters::read(GetPot &input)
 
   GETPOT_INPUT(volume_fraction_constraint);
 
+  GETPOT_INPUT(finite_difference);
+
+  GETPOT_INPUT(opt_scaling);
+
+  GETPOT_INPUT(traction_force);
+
+  GETPOT_INPUT(ftol_rel);
+  GETPOT_INPUT(xtol_rel);
+
+  GETPOT_INT_INPUT(maxeval);
+
+  GETPOT_INPUT(target_patch_size);
+
+  GETPOT_INPUT(output_solution_to_file);
+  GETPOT_INPUT(read_solution_from_file);
+
 
   GETPOT_INT_INPUT(nelem_target);
   GETPOT_INPUT(global_tolerance);

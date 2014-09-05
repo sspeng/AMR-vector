@@ -348,26 +348,50 @@ void TopOptSystem::init_data ()
 	u_var = this->add_variable ("u", static_cast<Order>(_fe_order),
 					  Utility::string_to_enum<FEFamily>(_fe_family));
 
-	// Set initial values of the parameters to 0.5
-
-	ExplicitSystem & densities = this->get_equation_systems().get_system<ExplicitSystem>("Densities");
 
 	this->init_bcs();
 
-    densities_filtered.init(*densities.solution.get());
 
-    gradient_filtered.init(*densities.solution.get());
-
-    gradient_filtered_temp.init(*densities.solution.get());
+	this->init_opt_vectors();
 
 	// Add the kernel matrix
 
-	//kernel_filter = &(SparseMatrix<Number>::build(this->comm()).release());
 
 	// Do the parent's initialization after variables are defined
 	FEMSystem::init_data();
 
 	this->time_evolving(0);
+}
+
+void TopOptSystem::init_opt_vectors ()
+{
+	ExplicitSystem & densities = this->get_equation_systems().get_system<ExplicitSystem>("Densities");
+	// These vectors are going to have a similar structure than the densities
+
+    std::ostringstream densities_filt;
+    densities_filt << "dens_filt";
+    densities.add_vector(densities_filt.str(),false,PARALLEL);
+
+
+    std::ostringstream grad;
+    grad << "grad";
+    densities.add_vector(grad.str(),false,PARALLEL);
+
+    std::ostringstream grad_filt;
+    grad_filt << "grad_filt";
+    densities.add_vector(grad_filt.str(),false,PARALLEL);
+
+    std::ostringstream vol_grad;
+    vol_grad << "vol_grad";
+    densities.add_vector(vol_grad.str(),false,PARALLEL);
+
+    std::ostringstream vol_grad_filt;
+    vol_grad_filt << "vol_grad_filt";
+    densities.add_vector(vol_grad_filt.str(),false,PARALLEL);
+
+
+
+	// Add the kernel matrix
 }
 
 void TopOptSystem::init_bcs()
@@ -420,11 +444,6 @@ void TopOptSystem::init_context(DiffContext &context)
   Nhat.resize((elem_fe->get_phi().size()),dim);
   CMat.resize(dim*dim,dim*dim);
   stress_flux_vect.resize(dim);
-
-
-  // Add Residual Derivative Object
-  AutoPtr<ResidualDerivative> dummy(new ResidualDerivative);
-  _res_der = dummy;
 
 
   FEMSystem::init_context(context);
@@ -522,37 +541,35 @@ bool TopOptSystem::element_time_derivative (bool request_jacobian,
  	  // Get gradient, we need it for the residual
       Tensor grad_u;
 
-     c.interior_gradient( u_var, qp, grad_u );
+      c.interior_gradient( u_var, qp, grad_u );
 
-     gradU(0) = grad_u(0,0);
-     gradU(1) = grad_u(1,0);
-     gradU(2) = grad_u(0,1);
-     gradU(3) = grad_u(1,1);
+      gradU(0) = grad_u(0,0);
+      gradU(1) = grad_u(1,0);
+      gradU(2) = grad_u(0,1);
+      gradU(3) = grad_u(1,1);
 
-     // Calculate stress
-     CMat.vector_mult(stress_temp,gradU);
+      // Calculate stress
+      CMat.vector_mult(stress_temp,gradU);
 
-     // Factor stress with the density
-     stress_temp *= density[0];
+      // Factor stress with the density
+      stress_temp *= density[0];
 
-     // Multiplied with the shape derivative matrix because of the
-     // contribution of the test variable inthe residual form
-     DNhat.vector_mult(stress,stress_temp);
+      // Multiplied with the shape derivative matrix because of the
+      // contribution of the test variable inthe residual form
+      DNhat.vector_mult(stress,stress_temp);
 
-     F.add(JxW[qp],stress);
+      F.add(JxW[qp],stress);
 
-     // Body force contribution
-     if (integrate_body_force){
-		 f = _body_force (Point(0,0,0), "u");
-		 f_temp(0) = f(0); f_temp(1) = f(1);
-		 // Negative because that's how the formulation is
-		 f_temp *= -1;
-		 Nhat.vector_mult_add(F,JxW[qp],f_temp);
-     }
+      // Body force contribution
+      if (integrate_body_force){
+    	  f = _body_force (Point(0,0,0), "u");
+    	  f_temp(0) = f(0); f_temp(1) = f(1);
+    	  // Negative because that's how the formulation is
+    	  f_temp *= -1;
+    	  Nhat.vector_mult_add(F,JxW[qp],f_temp);
+      }
 
   }
-  // Apply density
-  //K *= density[0];
 
   return compute_jacobian;
 }
@@ -627,7 +644,7 @@ void TopOptSystem::EvalElasticity(DenseMatrix<Real> & CMat) {
 }
 
 void
-TopOptSystem::attach_flux_bc_function (std::pair<bool,Gradient> fptr(const System& ,
+TopOptSystem::attach_flux_bc_function (std::pair<bool,Gradient> fptr(const TopOptSystem& ,
                                                                         const Point& ,
                                                                         const std::string&))
 {
@@ -727,7 +744,6 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
     FEMContext &_femcontext = libmesh_cast_ref<FEMContext&>(*con);
 
 	std::vector<Number> partialq_partialp(Np);
-	std::cout<<"Adjoint Analysis"<<std::endl;
 
 	// Our vector that accounts for the residual derivative is serial (we need one per element)
 	// but the adjoint vector is parallel, we need to get a serial copy to perform the dot product between them
@@ -744,6 +760,14 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 
 
 
+	// Reference to the gradient vector where we store the values
+    std::ostringstream grad;
+    grad << "grad";
+    NumericVector<Number> & gradient = aux_system.get_vector(grad.str());
+
+	// Update system, localize solutions
+	this->update();
+
 	for (; el != end_el; el++)
 	{
 		const Elem * elem = *el;
@@ -756,44 +780,6 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 		// Get the value, stored in density
 		aux_system.current_local_solution->get(densities_index, density);
 
-//		/*------------- THIS IS NO LONGER NECESSARY, DELETE AT SOME POINT -----------------------*/
-//		// We currently get partial derivatives via central differencing
-//		const Real delta_p = 1e-6;
-//		Number old_parameter = density[0];
-//		Number parameter_back = old_parameter - delta_p;
-//		aux_system.current_local_solution->set(densities_index[0],parameter_back);
-//		aux_system.current_local_solution->close();
-//		this->assemble_qoi(qoi_indices);
-//		std::vector<Number> qoi_minus = this->qoi;
-//
-//		this->assembly(true, false);
-//		this->rhs->close();
-//
-//		// FIXME - this can and should be optimized to avoid the clone()
-//		AutoPtr<NumericVector<Number> > partialR_partialp = this->rhs->clone();
-//		*partialR_partialp *= -1;
-//
-//		Number parameter_forward = old_parameter + delta_p;
-//		aux_system.current_local_solution->set(densities_index[0],parameter_forward);
-//		aux_system.current_local_solution->close();
-//		this->assemble_qoi(qoi_indices);
-//		std::vector<Number>& qoi_plus = this->qoi;
-//
-//
-//		for (unsigned int i=0; i != Nq; ++i)
-//		if (qoi_indices.has_index(i))
-//		partialq_partialp[i] = (qoi_plus[i] - qoi_minus[i]) / (2.*delta_p);
-//
-//		this->assembly(true, false);
-//		this->rhs->close();
-//		*partialR_partialp += *this->rhs;
-//		*partialR_partialp /= (2.*delta_p);
-//
-//		// Don't leave the parameter changed
-//		aux_system.current_local_solution->set(densities_index[0],old_parameter);
-//		aux_system.current_local_solution->close();
-		/*------------- THIS IS NO LONGER NECESSARY, DELETE AT SOME POINT -----------------------*/
-
 		// Here we calculate (partial R / partial p) using our built in function and we'll compare later.
 		this->assemble_res_derivative (qoi_indices, densities_index[0]);
 		// Calculate dQ/dP for this parameter
@@ -801,12 +787,6 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 		Number parameter_derivative;
 		_femcontext.elem_fe_reinit();
 		advanced_qoi[indice]->element_qoi_derivative_parameter(*con,parameter_derivative,density[0]);
-
-//		std::cout<<"Partial derivative with analytical"<<std::endl;
-//		this->get_resder_rhs(0).print();
-//
-//		std::cout<<"Partial derivative with FD"<<std::endl;
-//		partialR_partialp->print();
 
 		for (unsigned int i=0; i != Nq; ++i)
 			if (qoi_indices.has_index(i))
@@ -823,9 +803,18 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 //				  partialR_partialp->dot(*lift_func) -
 //				  partialR_partialp->dot(this->get_adjoint_solution(i));
 
+
+				Number sensitivity = parameter_derivative -
+						this->get_resder_rhs(0).dot(*lift_func) -
+						this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
+
+
 				sensitivities[i][densities_index[0]] = parameter_derivative -
 					this->get_resder_rhs(0).dot(*lift_func) -
 					this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
+
+
+				gradient.set(densities_index[0], sensitivity);
 				}
 				else{
 //				sensitivities[i][densities_index[0]] = partialq_partialp[i] -
@@ -834,7 +823,10 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 //				std::cout<<"Sensitivities with FD"<<std::endl;
 //				std::cout<<sensitivities[i][densities_index[0]]<<std::endl;
 
+				Number sensitivity = parameter_derivative -
+						this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
 
+				gradient.set(densities_index[0], sensitivity);
 				sensitivities[i][densities_index[0]] = parameter_derivative -
 				this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
 
@@ -844,9 +836,13 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 			}
 	}
 
+	gradient.close();
+
+	// Scale gradient
+	gradient *= this->opt_scaling;
+
 	// Sensitivities have been calculated
 	sensitivities_calculated = true;
-
 
 	// All parameters have been reset.
 	// We didn't cache the original rhs or matrix for memory reasons,
@@ -1020,12 +1016,12 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 	//			vonmises->element_qoi_derivative_parameter(*con,parameter_derivative,density[0]);
 	//			partialq_partialp[0][densities_index[0]] = parameter_derivative;
 	//		}
-			std::cout<<"hanging"<<std::endl;
+
 			// Here we calculate (partial R / partial p) using our built in function and we'll compare later.
 
 			this->assemble_res_derivative (qoi_indices, densities_index[0]);
 
-			std::cout<<"hanging"<<std::endl;
+
 			this->comm().barrier();
 
 			std::cout<<"dR/dP with analytical for element = "<<densities_index[0]<<std::endl;
@@ -1323,8 +1319,6 @@ void TopOptSystem::assemble_res_derivative (const QoISet& qoi_indices, const dof
 
   const MeshBase& mesh = this->get_mesh();
 
-  this->update();
-
   // The quantity of interest derivative assembly accumulates on
   // initially zero vectors
   this->add_resder_rhs(0).zero();
@@ -1333,10 +1327,11 @@ void TopOptSystem::assemble_res_derivative (const QoISet& qoi_indices, const dof
   this->set_vector_preservation(resder_rhs_name.str(),true);
 
   // Loop over every active mesh element on this processor
+
   Threads::parallel_for(elem_range.reset(mesh.active_local_elements_begin(),
                                          mesh.active_local_elements_end()),
 		  	  	  	  	ResDerivativeContributions(*this, qoi_indices,
-                                                   *(this->_res_der.release()),elem_id));
+                                                   this->_res_der,elem_id));
 
   // Close vectors for reuse
  this->get_resder_rhs(0).close();
@@ -1353,7 +1348,12 @@ void TopOptSystem::calculate_qoi(const QoISet &qoi_indices)
   FEMSystem::assemble_qoi(qoi_indices);
   std::vector<Number> qoi = this->qoi;
 
+
   computed_QoI[0] = qoi[0];
+
+  // Scale obj function
+
+  computed_QoI[0] *= this->opt_scaling;
 
 }
 
@@ -1391,31 +1391,43 @@ void TopOptSystem::finite_differences_check(ExplicitSystem * densities,
 	const MeshBase::const_element_iterator end_el = this->get_mesh().active_local_elements_end();
 
 
+	// Grab gradient vector
+
+    std::ostringstream grad;
+    grad << "grad";
+    NumericVector<Number> & gradient = aux_system.get_vector(grad.str());
 	std::cout<<"Comparing global sensitivities with Finite Differences"<<std::endl;
 
 	for (unsigned int i=0; i<this->n_processors(); i++){
+
 			for (; el != end_el; el++)
 			{
+				this->comm().barrier();
 				const Elem * elem = *el;
 				std::vector<Number> partialq_partialp(Nq, 0);
 				// (partial q / partial p) ~= (q(p+dp)-q(p-dp))/(2*dp)
 				// Get dof indices
 				Number old_parameter;
+
 				if (i == this->processor_id()) {
 					dof_map_densities.dof_indices(elem, densities_index, density_var);
 					// Get the value, stored in density
-					aux_system.current_local_solution->get(densities_index, density);
+					aux_system.solution->get(densities_index, density);
 
 					old_parameter = density[0];
 					Number parameter_back = old_parameter - delta_p;
-					aux_system.current_local_solution->set(densities_index[0],parameter_back);
+					aux_system.solution->set(densities_index[0],parameter_back);
 				}
 				this->comm().barrier();
-				aux_system.current_local_solution->close();
+
+				aux_system.solution->close();
+				aux_system.update();
+
 				// Solve system to obtain the new QoI
 				this->solve();
 				// Calculate perturbed QoI
 				this->assemble_qoi(qois);
+
 				std::vector<Number> qoi_minus = this->qoi;
 				if (p_norm_objectivefunction){
 					for (unsigned int k=0 ; k!=qoi.size(); k++)
@@ -1424,16 +1436,19 @@ void TopOptSystem::finite_differences_check(ExplicitSystem * densities,
 
 				Number parameter_forward = old_parameter + delta_p;
 
+
 				if (i == this->processor_id()) {
-					aux_system.current_local_solution->set(densities_index[0],parameter_forward);
+					aux_system.solution->set(densities_index[0],parameter_forward);
 				}
 				this->comm().barrier();
-				aux_system.current_local_solution->close();
+				aux_system.solution->close();
+				aux_system.update();
 				// Solve system to obtain the new QoI
 				this->solve();
 				// Calculate perturbed QoI
 				this->assemble_qoi(qois);
 				std::vector<Number>& qoi_plus = this->qoi;
+
 				if (p_norm_objectivefunction){
 					for (unsigned int k=0 ; k!=qoi.size(); k++)
 						qoi_plus[k]= pow(qoi_plus[k], 1.0/pnorm_parameter);
@@ -1441,31 +1456,30 @@ void TopOptSystem::finite_differences_check(ExplicitSystem * densities,
 
 				if (i == this->processor_id()) {
 					// Don't leave the parameter changed
-					aux_system.current_local_solution->set(densities_index[0],old_parameter);
+					aux_system.solution->set(densities_index[0],old_parameter);
 				}
 				this->comm().barrier();
-				aux_system.current_local_solution->close();
+				aux_system.solution->close();
+				aux_system.update();
 
 				std::cout<<"Sensitivities with FD  -----  Sensitivities with analytical"<<std::endl;
 				if (i == this->processor_id()) {
 					for (unsigned int i=0; i != Nq; ++i) {
-						if (qois.has_index(i))
+						if (qois.has_index(i)){
 							sensitivities_fd[i][densities_index[0]] = (qoi_plus[i] - qoi_minus[i]) / (2.*delta_p);
-
-						std::cout<<sensitivities_fd[i][densities_index[0]]<<"   		     "<<sensitivities[i][densities_index[0]]<<std::endl;
+							// Scale it
+							sensitivities_fd[i][densities_index[0]] *= this->opt_scaling;
+						}
+						std::cout<<sensitivities_fd[i][densities_index[0]]<<"   		     "<<gradient.el(densities_index[0])<<std::endl;
 					}
 				}
-				this->comm().barrier();
 			}
-		this->comm().barrier();
-
-
 	}
 
 
 }
 
-void TopOptSystem::transfer_densities(ExplicitSystem & densities, const MeshBase & mesh, const std::vector<double> & x, const bool & filter){
+void TopOptSystem::transfer_densities(ExplicitSystem & densities, const std::vector<double> & x, const bool & filter){
 
 	// First, we need to transfer the densities from the solution to the global solution
 	// vector in the densities system. Because x hsa the same size than the global vector,
@@ -1476,6 +1490,13 @@ void TopOptSystem::transfer_densities(ExplicitSystem & densities, const MeshBase
 	densities.update();
 
 	// Copy them back to the original densities field
+
+
+    std::ostringstream densities_filt;
+    densities_filt << "dens_filt";
+    NumericVector<Number> & densities_filtered = densities.get_vector(densities_filt.str());
+
+    densities_filtered.zero();
 
 	if (filter){
 		// Apply filter
@@ -1489,29 +1510,40 @@ void TopOptSystem::transfer_densities(ExplicitSystem & densities, const MeshBase
 		densities.solution->close();
 		densities.update();
 	}
+
 }
 
-void TopOptSystem::filter_gradient(const std::vector<Number> & gradient, ExplicitSystem & densities, std::vector<double> & grad){
+void TopOptSystem::filter_gradient(std::vector<double> & grad){
 
-	std::vector<dof_id_type> density_index;
-	const DofMap& dof_map_densities = densities.get_dof_map();
 
-	unsigned int density_var = densities.variable_number ("rho");
+	ExplicitSystem & densities =this->get_equation_systems().get_system<ExplicitSystem>("Densities");
 
-	// Copy sensitivities
-	gradient_filtered = gradient;
 
-	gradient_filtered_temp.zero();
+    std::ostringstream gradiente;
+    gradiente << "grad";
+    NumericVector<Number> & gradient = densities.get_vector(gradiente.str());
+    std::ostringstream grad_filt;
+    grad_filt << "grad_filt";
+    NumericVector<Number> & gradient_filtered = densities.get_vector(grad_filt.str());
 
-	// Perform product of gradient_filtered_temp = (kernel_filter_parallel)^T * gradient_filtered (right now they're just the derivatives)
-	gradient_filtered_temp.add_vector_transpose(gradient_filtered, kernel_filter_parallel);
+	gradient_filtered.zero();
+
+	// Perform product of gradient_filtered = (kernel_filter_parallel)^T * gradient (right now they're just the derivatives)
+	gradient_filtered.add_vector_transpose(gradient, kernel_filter_parallel);
+
+	gradient_filtered.close();
+
+	// No need to do any scaling because we already do it at adjoint_qoi_parameter_sensitivity
 
 	// The filtered gradient is gradient_filtered_temp, copy them back to the sensitivities
-	gradient_filtered_temp.localize(grad);
+	gradient_filtered.localize(grad);
+
+
+
 
 }
 
-Number TopOptSystem::calculate_volume_constraint(ExplicitSystem & densities, std::vector<double> & grad){
+Number TopOptSystem::calculate_filtered_volume_constraint(ExplicitSystem & densities, std::vector<double> & grad){
 
 
 	// Sensitivities have been updated with the filter
@@ -1526,6 +1558,12 @@ Number TopOptSystem::calculate_volume_constraint(ExplicitSystem & densities, std
 
 
 	Number total_volume(0.0), current_volume(0.0);
+    std::ostringstream vol_grad, vol_grad_filt;
+    vol_grad << "vol_grad";
+    vol_grad_filt << "vol_grad_filt";
+
+    NumericVector<Number> & volume_gradient = densities.get_vector(vol_grad.str());
+    NumericVector<Number> & volume_gradient_filtered = densities.get_vector(vol_grad_filt.str());
 	for ( ; el != end_el ; ++el){
 		const Elem * elem = *el;
 		densities.get_dof_map().dof_indices (elem, densities_index, density_var);
@@ -1534,11 +1572,19 @@ Number TopOptSystem::calculate_volume_constraint(ExplicitSystem & densities, std
 		total_volume += elem_volume;
 		current_volume += density[0]*elem_volume;
 
-		grad[densities_index[0]] = 1.0;
+		volume_gradient.set(densities_index[0],1.0);
 	}
 
+	volume_gradient.close();
 
+	// Perform product of gradient_filtered_temp = (kernel_filter_parallel)^T * gradient_filtered (right now they're just the derivatives)
+	volume_gradient_filtered.add_vector_transpose(volume_gradient, kernel_filter_parallel);
 
+	volume_gradient_filtered.localize(grad);
+
+	// We need to collect both the current_volume and total_volume from all processors
+	this->comm().sum(current_volume);
+	this->comm().sum(total_volume);
 	Number volume_fraction = current_volume / total_volume - volume_fraction_constraint;
 
 	return volume_fraction;
@@ -1546,6 +1592,9 @@ Number TopOptSystem::calculate_volume_constraint(ExplicitSystem & densities, std
 }
 
 void TopOptSystem::update_kernel(){
+
+	// Get system
+	ExplicitSystem& aux_system = this->get_equation_systems().get_system<ExplicitSystem>("Densities");
 
 	// Number of processors
 	unsigned int n_processors = this->n_processors();
@@ -1559,8 +1608,8 @@ void TopOptSystem::update_kernel(){
 
 	std::queue<const Elem*> queue_elements;
 
-	dof_id_type n_elements_kernel_local = mesh_parallel.n_active_local_elem();
-	dof_id_type n_elements_kernel = mesh_parallel.n_active_elem();
+	dof_id_type n_elements_kernel_local = aux_system.n_local_dofs();
+	dof_id_type n_elements_kernel = aux_system.n_dofs();
 
 	// Number of on-processor non-zeros per row
 	std::vector< numeric_index_type > n_nz, n_oz;
@@ -1576,14 +1625,13 @@ void TopOptSystem::update_kernel(){
 	std::vector<bool> marked_elements;
 	marked_elements.resize(n_elements_kernel);
 
-	// Get system
-	ExplicitSystem& aux_system = this->get_equation_systems().get_system<ExplicitSystem>("Densities");
+
 	// Array to hold the dof indices
 	std::vector<dof_id_type> density_neighbor;
 	std::vector<dof_id_type> density_current;
 
-	numeric_index_type first_local_index = aux_system.solution->first_local_index();
-	numeric_index_type last_local_index = aux_system.solution->last_local_index();
+	numeric_index_type first_local_index = aux_system.get_dof_map().first_dof();
+	numeric_index_type last_local_index = aux_system.get_dof_map().last_dof();
 
 
 	PetscVector<Number> * local_copy_global_density_auxiliar = (PetscVector<Number> *) aux_system.solution.get();
@@ -1657,13 +1705,17 @@ void TopOptSystem::update_kernel(){
 		}
 	}
 
-	unsigned int local_size_matrix = aux_system.solution->local_size();
+	unsigned int local_size_matrix = aux_system.n_local_dofs();
+
+	// Clear initialized matrices
+	if (kernel_filter_parallel.initialized())
+		kernel_filter_parallel.clear();
+
 	// Allocate memory in matrix
-	kernel_filter_parallel.init(n_elements_kernel,n_elements_kernel,local_size_matrix,local_size_matrix,n_nz,n_oz,1);
+	kernel_filter_parallel.init(n_elements_kernel,n_elements_kernel,local_size_matrix,local_size_matrix,n_nz,n_oz);
+	std::cout<<"success"<<std::endl;
 	// Second pass
 	el     =  mesh_parallel.active_local_elements_begin();
-
-	kernel_filter_parallel.attach_dof_map(aux_system.get_dof_map());
 
 	for ( ; el != end_el ; ++el){
 		Elem * elem = *el;
@@ -1716,13 +1768,15 @@ void TopOptSystem::update_kernel(){
 		 */
 		// Normalize the row vector
 		row_vector *= 1.0/normalization_coeffient;
+
 		kernel_filter_parallel.add_matrix(row_vector,rows,cols);
 	}
 	kernel_filter_parallel.close();
 
-	kernel_filter_parallel.print();
-
 	mesh_parallel.delete_remote_elements();
+
+	kernel_filter_parallel.attach_dof_map(aux_system.get_dof_map());
+
 
 	std::cout<<"Kernel finalized and built"<<std::endl;
 

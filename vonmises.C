@@ -37,6 +37,17 @@ VonMisesPnorm::VonMisesPnorm(ExplicitSystem * densities, TopOptSystem * femsyste
 	PdevCMat = Identity;
 
 	von_mises_index = 0;
+
+
+	a_a.resize(dim*dim);
+	b_b.resize(dim*dim);
+	a_b.resize(dim*dim);
+	b_a.resize(dim*dim);
+
+	a_a(0) = 1.0;
+	b_b(dim*dim - 1) = 1.0;
+	a_b(dim-1) = 1.0;
+	b_a(dim) = 1.0;
 }
 
 void VonMisesPnorm::init_qoi( std::vector<Number>& sys_qoi )
@@ -113,16 +124,10 @@ void VonMisesPnorm::element_qoi (DiffContext &context,
 
 	stress_vector *= density_parameter;
 
-	// Calculate deviatoric stress
-	Number stress_trace = stress_vector(0) + stress_vector(3);
-
-	DenseVector<Number> stress_deviatoric = stress_vector;
-	stress_deviatoric(0) = stress_deviatoric(0) - 1.0/3.0 * stress_trace;
-	stress_deviatoric(3) = stress_deviatoric(3) - 1.0/3.0 * stress_trace;
-
-	VonMises = sqrt(1.5*stress_deviatoric.dot(stress_deviatoric));
-
-	Number prueba = c.get_elem().volume()*pow(VonMises,_femsystem->pnorm_parameter);
+	VonMises = sqrt(stress_vector(0)*stress_vector(0)
+							- stress_vector(0)*stress_vector(3)
+							+ stress_vector(3)*stress_vector(3)
+							+ 3*stress_vector(1)*stress_vector(1));
 
 	c.get_qois()[von_mises_index] = c.get_qois()[von_mises_index] + c.get_elem().volume()*pow(VonMises,_femsystem->pnorm_parameter);
 
@@ -143,9 +148,6 @@ void VonMisesPnorm::element_qoi_derivative (DiffContext &context,
 
 	// Derivatives of the rlement basis functions
 	const std::vector<std::vector<RealTensor> > &dphi = elem_fe->get_dphi();
-
-	Number VonMises = 0.;
-
 	/*
 	* Calculating Von Mises stress
 	*/
@@ -188,35 +190,62 @@ void VonMisesPnorm::element_qoi_derivative (DiffContext &context,
 
 	stress_vector *= density_parameter;
 
-	// Calculate deviatoric stress
-	Number stress_trace = stress_vector(0) + stress_vector(3);
+	Number VonMises = sqrt(stress_vector(0)*stress_vector(0)
+							- stress_vector(0)*stress_vector(3)
+							+ stress_vector(3)*stress_vector(3)
+							+ 3.0*stress_vector(1)*stress_vector(1));
 
-	DenseVector<Number> stress_deviatoric = stress_vector;
-	stress_deviatoric(0) = stress_vector(0) - 1.0/3.0 * stress_trace;
-	stress_deviatoric(3) = stress_vector(3) - 1.0/3.0 * stress_trace;
+	DenseVector<Number> VonMises_derivative_stress, gradient_no_qoi;
+	VonMises_derivative_stress.resize(dim*dim);
 
-	VonMises = sqrt(1.5*stress_deviatoric.dot(stress_deviatoric));
+	VonMises_derivative_stress.add((2.0*stress_vector(0) - stress_vector(3)), a_a);
 
-	stress_deviatoric *= 1.0/VonMises;
+	VonMises_derivative_stress.add((2.0*stress_vector(3) - stress_vector(0)), b_b);
+
+	VonMises_derivative_stress.add(3.0*stress_vector(1), a_b);
+
+	VonMises_derivative_stress.add(3.0*stress_vector(1), b_a);
+
+	VonMises_derivative_stress *= 1.0 / (2.0* VonMises);
+
 
 	ElasticityTools::DNHatMatrix(DNhat,dim,dphi,qp);
 
-	// Fill the QoI RHS corresponding to this QoI. Since this is the 0th QoI
-	// we fill in the [0][i] subderivatives, i corresponding to the variable index.
-	// Our system has only one variable, so we only have to fill the [0][0] subderivative
-	// DO NOT CONFUSE variable with design variable, here variable means displacement, velocity or other
-	// implicit quantity
-	std::vector<DenseVector<Number> > &Q = c.get_qoi_derivatives();
+	CMat.right_multiply_transpose(DNhat);
 
-	TempMatrix = PdevCMat;
+	CMat *= density_parameter;
 
-	TempMatrix.right_multiply_transpose(DNhat);
+	CMat.vector_mult_transpose(gradient_no_qoi,VonMises_derivative_stress);
 
-	TempMatrix.vector_mult_transpose(temp_vector, stress_deviatoric);
+//	// Calculate deviatoric stress
+//	Number stress_trace = stress_vector(0) + stress_vector(3);
+//
+//	DenseVector<Number> stress_deviatoric = stress_vector;
+//	stress_deviatoric(0) = stress_vector(0) - 1.0/3.0 * stress_trace;
+//	stress_deviatoric(3) = stress_vector(3) - 1.0/3.0 * stress_trace;
+//
+//	VonMises = sqrt(1.5*stress_deviatoric.dot(stress_deviatoric));
+//
+//	stress_deviatoric *= 1.0/VonMises;
+//
+//	ElasticityTools::DNHatMatrix(DNhat,dim,dphi,qp);
+//
+//	// Fill the QoI RHS corresponding to this QoI. Since this is the 0th QoI
+//	// we fill in the [0][i] subderivatives, i corresponding to the variable index.
+//	// Our system has only one variable, so we only have to fill the [0][0] subderivative
+//	// DO NOT CONFUSE variable with design variable, here variable means displacement, velocity or other
+//	// implicit quantity
 
-	temp_vector *= 1.5;
-
-	temp_vector *= density_parameter;
+//
+//	TempMatrix = PdevCMat;
+//
+//	TempMatrix.right_multiply_transpose(DNhat);
+//
+//	TempMatrix.vector_mult_transpose(temp_vector, stress_deviatoric);
+//
+//	temp_vector *= 1.5;
+//
+//	temp_vector *= density_parameter;
 
 	//Grab the QoI because we need it for the computation of the derivatives
 	/*
@@ -230,8 +259,9 @@ void VonMisesPnorm::element_qoi_derivative (DiffContext &context,
     // Coefficients from the derivatives of the same element
     von_mises_sum *= c.get_elem().volume()*pnorm_parameter*pow(VonMises,pnorm_parameter - 1.0);
 
+	std::vector<DenseVector<Number> > &Q = c.get_qoi_derivatives();
     // Add the contribution
-    Q[von_mises_index].add(von_mises_sum, temp_vector);
+    Q[von_mises_index].add(von_mises_sum, gradient_no_qoi);
 }
 
 void VonMisesPnorm::element_qoi_derivative_parameter (DiffContext &context, Number & parameter_derivative, Number density_element){
@@ -247,7 +277,6 @@ void VonMisesPnorm::element_qoi_derivative_parameter (DiffContext &context, Numb
 	// Derivatives of the rlement basis functions
 	const std::vector<std::vector<RealTensor> > &dphi = elem_fe->get_dphi();
 
-	Number VonMises = 0.;
 
 	/*
 	* Calculating Von Mises stress
@@ -278,24 +307,51 @@ void VonMisesPnorm::element_qoi_derivative_parameter (DiffContext &context, Numb
 	// Apply SIMP function
 	SIMP_function(density_element_function);
 
+	DenseVector<Number> stress_vector_no_SIMP = stress_vector;
+
 	stress_vector *= density_element_function;
 
-	// Calculate deviatoric stress
-	Number stress_trace = stress_vector(0) + stress_vector(3);
+	Number VonMises = sqrt(stress_vector(0)*stress_vector(0)
+							- stress_vector(0)*stress_vector(3)
+							+ stress_vector(3)*stress_vector(3)
+							+ 3.0*stress_vector(1)*stress_vector(1));
 
-	DenseVector<Number> stress_deviatoric = stress_vector;
-	stress_deviatoric(0) = stress_vector(0) - 1.0/3.0 * stress_trace;
-	stress_deviatoric(3) = stress_vector(3) - 1.0/3.0 * stress_trace;
+	DenseVector<Number> VonMises_derivative_stress, gradient_no_qoi;
+	VonMises_derivative_stress.resize(dim*dim);
 
-	VonMises = sqrt(1.5*stress_deviatoric.dot(stress_deviatoric));
+	VonMises_derivative_stress.add((2.0*stress_vector(0) - stress_vector(3)), a_a);
 
-	stress_deviatoric *= 1.0/VonMises;
+	VonMises_derivative_stress.add((2.0*stress_vector(3) - stress_vector(0)), b_b);
 
-	PdevCMat.vector_mult_transpose(temp_vector, stress_deviatoric);
+	VonMises_derivative_stress.add(3.0*stress_vector(1), a_b);
 
-	temp_vector *= 1.5;
+	VonMises_derivative_stress.add(3.0*stress_vector(1), b_a);
 
-	Number derivative = temp_vector.dot(gradU);
+	VonMises_derivative_stress *= 1.0 / (2.0* VonMises);
+
+    SIMP_function_derivative(density_element);
+
+    stress_vector_no_SIMP *= density_element;
+
+
+
+//	// Calculate deviatoric stress
+//	Number stress_trace = stress_vector(0) + stress_vector(3);
+//
+//	DenseVector<Number> stress_deviatoric = stress_vector;
+//	stress_deviatoric(0) = stress_vector(0) - 1.0/3.0 * stress_trace;
+//	stress_deviatoric(3) = stress_vector(3) - 1.0/3.0 * stress_trace;
+//
+//	VonMises = sqrt(1.5*stress_deviatoric.dot(stress_deviatoric));
+//
+//	stress_deviatoric *= 1.0/VonMises;
+
+
+//	PdevCMat.vector_mult_transpose(temp_vector, stress_deviatoric);
+//
+//	temp_vector *= 1.5;
+//
+//	Number derivative = temp_vector.dot(gradU);
 
 	//Grab the QoI because we need it for the computation of the derivatives
 	/*
@@ -308,9 +364,9 @@ void VonMisesPnorm::element_qoi_derivative_parameter (DiffContext &context, Numb
     von_mises_sum *= c.get_elem().volume()*pnorm_parameter*pow(VonMises,pnorm_parameter - 1.0);
 
 
-    SIMP_function_derivative(density_element);
 
-    parameter_derivative = von_mises_sum * density_element * derivative;
+
+    parameter_derivative = von_mises_sum * VonMises_derivative_stress.dot(stress_vector_no_SIMP);
 
 
 }
@@ -392,14 +448,10 @@ void VonMisesPnorm::element_qoi_for_FD (AutoPtr<NumericVector<Number> > & local_
 
 	stress_vector *= density_parameter;
 
-	// Calculate deviatoric stress
-	Number stress_trace = stress_vector(0) + stress_vector(3);
-
-	DenseVector<Number> stress_deviatoric = stress_vector;
-	stress_deviatoric(0) = stress_deviatoric(0) - 1.0/3.0 * stress_trace;
-	stress_deviatoric(3) = stress_deviatoric(3) - 1.0/3.0 * stress_trace;
-
-	VonMises = sqrt(1.5*stress_deviatoric.dot(stress_deviatoric));
+	VonMises = sqrt(stress_vector(0)*stress_vector(0)
+							- stress_vector(0)*stress_vector(3)
+							+ stress_vector(3)*stress_vector(3)
+							+ 3.0*stress_vector(1)*stress_vector(1));
 
 	qoi_computed =  elem->volume()*pow(VonMises,_femsystem->pnorm_parameter);
 }

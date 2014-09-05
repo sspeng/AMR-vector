@@ -34,7 +34,8 @@ public:
     print_residual_norms(false), print_residuals(false),
     print_jacobian_norms(false), print_jacobians(false),
     ramp_parameter(10), initial_density(0.5), minimum_density(0.001),
-    filter_parameter(1.0), volume_fraction_constraint(0.5), pnorm_parameter(1){}
+    filter_parameter(1.0), volume_fraction_constraint(0.5), pnorm_parameter(1),
+    finite_difference(true), opt_scaling(1.0), target_patch_size(8){}
 
   void read(GetPot &input);
 
@@ -73,6 +74,19 @@ public:
 
   Number initial_density, minimum_density, filter_parameter, volume_fraction_constraint;
   unsigned int pnorm_parameter;
+
+  bool finite_difference, output_solution_to_file, read_solution_from_file;
+
+  Real opt_scaling;
+
+
+  Real traction_force;
+
+  Real ftol_rel, xtol_rel;
+
+  unsigned int maxeval;
+
+  unsigned int target_patch_size;
 
 
 

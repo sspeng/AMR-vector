@@ -28,7 +28,7 @@ void ComplianceTraction::init_qoi( std::vector<Number>& sys_qoi )
   return;
 }
 
-void ComplianceTraction::attach_flux_bc_function (std::pair<bool,Gradient> fptr(const System& ,
+void ComplianceTraction::attach_flux_bc_function (std::pair<bool,Gradient> fptr(const TopOptSystem& ,
                                                                         const Point& ,
                                                                         const std::string&))
 {
@@ -60,8 +60,7 @@ void ComplianceTraction::side_qoi (DiffContext &context,
   Number dQoI_0 = 0.;
 
   // Because the traction is constant along the face, we call it now
-  System * dummy;
-  std::pair<bool,Gradient>  flux_pair = _bc_function(*dummy,Point(0,0,0), "u");
+  std::pair<bool,Gradient>  flux_pair = _bc_function(*_femsystem,Point(0,0,0), "u");
 
   // Only integrate on the boundary where the traction is apploed
 
@@ -126,8 +125,7 @@ void ComplianceTraction::side_qoi_derivative (DiffContext &context,
 
 
   // Because the traction is constant along the face, we call it now
-  System * dummy;
-  std::pair<bool,Gradient>  flux_pair = _bc_function(*dummy,Point(0,0,0), "u");
+  std::pair<bool,Gradient>  flux_pair = _bc_function(*_femsystem,Point(0,0,0), "u");
 
   // Grab boundary ids in side element
   std::vector<boundary_id_type> side_BdId = c.side_boundary_ids();
@@ -202,8 +200,8 @@ void ComplianceTraction::element_qoi_for_FD (AutoPtr<NumericVector<Number> > & l
 
 
 		// Because the traction is constant along the face, we call it now
-		System * dummy;
-		std::pair<bool,Gradient>  flux_pair = _bc_function(*dummy,Point(0,0,0), "u");
+
+		std::pair<bool,Gradient>  flux_pair = _bc_function(*_femsystem,Point(0,0,0), "u");
 
 		// Get the gradient
 		// Grab the dof indices for this element (global degree of freedom)

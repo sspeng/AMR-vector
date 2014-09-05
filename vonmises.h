@@ -70,6 +70,8 @@ protected:
 	// Matrix to keep the product of the Pdev and the Cmat
 	DenseMatrix<Number> PdevCMat;
 
+	DenseVector<Number> a_a, b_b, a_b, b_a;
+
 	unsigned int von_mises_index;
 
 

@@ -33,7 +33,7 @@ public:
 
   virtual void side_qoi (DiffContext &context, const QoISet & qois);
 
-  void attach_flux_bc_function (std::pair<bool,Gradient> fptr(const System& ,
+  void attach_flux_bc_function (std::pair<bool,Gradient> fptr(const TopOptSystem& ,
                                                                           const Point& ,
                                                                           const std::string&));
 
@@ -50,7 +50,7 @@ protected:
   /**
    * Pointer to function that returns BC information.
    */
-  std::pair<bool,Gradient> (* _bc_function) (const System& system,
+  std::pair<bool,Gradient> (* _bc_function) (const TopOptSystem& system,
                                          const Point& p,
                                          const std::string& var_name);
 

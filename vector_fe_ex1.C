@@ -105,6 +105,10 @@
 // Include optimizer
 #include "nlopt.hpp"
 
+
+#include <iostream>
+#include <fstream>
+
 // Bring in everything from the libMesh namespace
 using namespace libMesh;
 
@@ -135,8 +139,8 @@ void write_output(EquationSystems &es,
 
 void EvalElasticity(DenseMatrix<Real> & CMat) {
 
-	Number _lambda = 200e6;
-	Number _mu = 100e6;
+	Number _lambda = 12;
+	Number _mu = 8;
 	CMat(0,0) = _lambda + 2*_mu;
 	CMat(3,3) = _lambda + 2*_mu;
 	CMat(1,1) = _mu;
@@ -177,11 +181,6 @@ std::pair<bool,Tensor> stress_function (const System& ,
 
 }
 
-
-
-std::pair<bool,Gradient> bc_function (const System& system,
-                                        const Point& p,
-                                        const std::string& var_name);
 
 // Set the parameters for the nonlinear and linear solvers to be used during the simulation
 
@@ -241,8 +240,18 @@ void set_system_parameters(TopOptSystem &system, FEMParameters &param)
 
   system.volume_fraction_constraint = param.volume_fraction_constraint;
 
+  system.read_solution_from_file = param.read_solution_from_file;
+
+  system.output_solution_to_file = param.output_solution_to_file;
+
   // Set elasticity constants
   system.set_elasticity_modules(param.lambda, param.mu);
+
+  // Objective scaling function
+  system.opt_scaling = param.opt_scaling;
+
+  // Traction vertical force
+  system.traction_force = param.traction_force;
 }
 
 
@@ -422,6 +431,7 @@ AutoPtr<ErrorEstimator> build_error_estimator(FEMParameters &param, TopOptSystem
       PatchRecoveryErrorEstimatorElasticity *p1 =
         new PatchRecoveryErrorEstimatorElasticity;
       p1->attach_elasticity_tensor(&EvalElasticity);
+      p1->target_patch_size = param.target_patch_size;
       adjoint_residual_estimator->primal_error_estimator().reset(p1);
 
       PatchRecoveryErrorEstimatorElasticity *p2 =
@@ -439,10 +449,10 @@ AutoPtr<ErrorEstimator> build_error_estimator(FEMParameters &param, TopOptSystem
   return error_estimator;
 }
 
-std::pair<bool,Gradient> bc_function (const System&,
+std::pair<bool,Gradient> bc_function (const TopOptSystem& system,
                                         const Point&,
                                         const std::string& ){
-	Gradient stress_flux(0,-2);
+	Gradient stress_flux(0,-1*system.traction_force);
 
 	std::pair<bool,Gradient> result(true,stress_flux);
 	return result;
@@ -468,9 +478,10 @@ double myfunc(const std::vector<double> & x, std::vector<double> & grad, void * 
 	// Grab systems
 	TopOptSystem & system = equation_systems->get_system<TopOptSystem>("Elasticity");
 	ExplicitSystem & densities = equation_systems->get_system<ExplicitSystem>("Densities");
+    system.comm().barrier();
 
 	// Transfer the value of the variables to the density field
-	system.transfer_densities(densities, mesh, x, true);
+	system.transfer_densities(densities, x, true);
 
 	// Create QoIs set and indices
 	QoISet qois;
@@ -478,6 +489,16 @@ double myfunc(const std::vector<double> & x, std::vector<double> & grad, void * 
 	qoi_indices.push_back(0);
 	qois.add_indices(qoi_indices);
 	qois.set_weight(0, 1.0);
+
+	// Copy solution to a file
+	if (system.output_solution_to_file){
+		std::ofstream myfile;
+		myfile.open ("variables.txt", std::ofstream::out | std::ofstream::trunc);
+		for (unsigned int i = 0; i < x.size(); i++)
+			myfile << x[i]<<"\n";
+
+		myfile.close();
+	}
 
 	// Solve system
 	system.solve();
@@ -509,24 +530,28 @@ double myfunc(const std::vector<double> & x, std::vector<double> & grad, void * 
 	// Now that we have solved the adjoint, set the adjoint_already_solved boolean to true, so we dont solve unneccesarily in the error estimator
 	system.set_adjoint_already_solved(true);
 
-	//system.finite_differences_check(&densities,qois,sensitivities,system.get_parameter_vector());
-
     // Compute the approximate QoIs and write them out to the console
     system.calculate_qoi(qois);
     Number QoI_0_computed = system.get_QoI_value(0);
 
-    // Transfer the gradient and apply filter
-    system.filter_gradient(sensitivities.derivative_qoi(0), densities, grad);
+    // Transfer the gradient, apply filter and scale it
+    system.filter_gradient(grad);
 
+    // Scale objective function
+    QoI_0_computed *= system.opt_scaling;
     system.contador++;
 
     std::cout<<"Iteration # "<<system.contador<<" Function value = "<<QoI_0_computed<<std::endl;
 
     if (system.contador % 20 == 0){
     	std::cout<<"Printing densities"<<std::endl;
-    	system.densities_filtered.print();
+        std::ostringstream densities_filt;
+        densities_filt << "dens_filt";
+        NumericVector<Number> & densities_filtered = densities.get_vector(densities_filt.str());
+    	densities_filtered.print();
     }
 
+    system.comm().barrier();
 	return QoI_0_computed;
 }
 
@@ -541,17 +566,15 @@ double myvolumeconstraint(const std::vector<double> & x, std::vector<double> & g
 	TopOptSystem & system = equation_systems->get_system<TopOptSystem>("Elasticity");
 	ExplicitSystem & densities = equation_systems->get_system<ExplicitSystem>("Densities");
 
+    system.comm().barrier();
+
 	// Transfer the value of the variables to the density field
-	system.transfer_densities(densities, mesh, x, true);
-
-	std::vector<double> grad_temp;
-	grad_temp.resize(mesh.n_active_elem());
-	Number volume_constraint = system.calculate_volume_constraint(densities, grad_temp);
-
-    // Transfer the gradient and apply filter
-    system.filter_gradient(grad_temp, densities, grad);
+	system.transfer_densities(densities, x, true);
 
 
+	Number volume_constraint = system.calculate_filtered_volume_constraint(densities, grad);
+
+    system.comm().barrier();
     return volume_constraint;
 }
 
@@ -607,26 +630,7 @@ int main (int argc, char** argv)
 	// Read in the mesh
 	mesh.read(param.domainfile.c_str());
 
-	// Add a Dirichlet condition on the top of the third element, i.e., where the L is hanging from.
-//	dof_id_type last_elem = mesh.n_active_elem()-1;
-//	std::cout<<"ult element "<<last_elem<<std::endl;
-//	//mesh.boundary_info->add_side(last_elem,2,0);
-//	std::cout<<"Print mesh info now"<<std::endl;
-	mesh.print_info();
-
 	bool p_norm_objectivefunction = false;
-
-	// Use the MeshTools::Generation mesh generator to create a uniform
-	// 2D grid on the rectangle [0 , 1] x [0 , 0.2].  We instruct the mesh generator
-	// to build a mesh of 50x10 QUAD9 elements.
-	//  MeshTools::Generation::build_square (mesh,
-	//                                              2, 2,
-	//                                              0., 2.,
-	//                                              0., 2.,
-	//                                              QUAD4); // Change the variable approx order if you change the element type
-	//  // Create a vector storing the boundaries id's. In this case, all the boundaries
-	//  const boundary_id_type all_ids[4] = {0,1,2,3};
-	//  std::set<boundary_id_type> boundary_ids( all_ids, all_ids+4 );
 
 	// Create an equation systems object.
 	EquationSystems equation_systems (mesh);
@@ -641,19 +645,18 @@ int main (int argc, char** argv)
 	TopOptSystem& system = equation_systems.add_system<TopOptSystem> ("Elasticity");
 
 	// New system to compute the Von Mises stress
-	ExplicitSystem & vonmises_system = equation_systems.add_system<ExplicitSystem> ("VonMises");
-	vonmises_system.add_variable("vonmises", CONSTANT, MONOMIAL);
+//	ExplicitSystem & vonmises_system = equation_systems.add_system<ExplicitSystem> ("VonMises");
+//	vonmises_system.add_variable("vonmises", CONSTANT, MONOMIAL);
 
 	// Add objective function in the boundary
-//	ComplianceTraction compliancetractionqoi(&densities, &system);
-//	compliancetractionqoi.attach_flux_bc_function(&bc_function);
-//	compliancetractionqoi.assemble_qoi_sides = true;
-//	system.attach_advanced_qoi(&compliancetractionqoi);
-//	// Make sure we get the contributions to the adjoint RHS from the sides
-//	system.assemble_qoi_sides = true;
+	ComplianceTraction compliancetractionqoi(&densities, &system);
+	compliancetractionqoi.attach_flux_bc_function(&bc_function);
+	compliancetractionqoi.assemble_qoi_sides = true;
+	system.attach_advanced_qoi(&compliancetractionqoi);
+	// Make sure we get the contributions to the adjoint RHS from the sides
+	system.assemble_qoi_sides = true;
 	// Add a Neumann condition at the right side of the second element,
 	// the other tip of the L. Side ordering starts from zero on the lower side and goes counter clockwise
-	//mesh.boundary_info->add_side(1,1,1);
 	// Attach Traction.
 	system.attach_flux_bc_function(&bc_function);
 
@@ -689,11 +692,11 @@ int main (int argc, char** argv)
 
 
 
-	VonMisesPnorm vonmises(&densities,&system,&qois);
-	system.p_norm_objectivefunction = true;
-	system.attach_advanced_qoi(&vonmises);
-	p_norm_objectivefunction = true;
-	system.assemble_qoi_sides = false;
+//	VonMisesPnorm vonmises(&densities,&system,&qois);
+//	system.p_norm_objectivefunction = true;
+//	system.attach_advanced_qoi(&vonmises);
+//	p_norm_objectivefunction = true;
+//	system.assemble_qoi_sides = false;
 
 
 
@@ -722,27 +725,28 @@ int main (int argc, char** argv)
 	// Prints information about the system to the screen.
 	equation_systems.print_info();
 
-	// Solve the system "Elasticity".  Note that calling this
-	// member will assemble the linear system and invoke
-	// the default numerical solver.  With PETSc the solver can be
-	// controlled from the command line.  For example,
-	// you can invoke conjugate gradient with:
-	//
-	// ./vector_fe_ex1 -ksp_type cg
-	//
-	// You can also get a nice X-window that monitors the solver
-	// convergence with:
-	//
-	// ./vector_fe_ex1 -ksp_xmonitor
-	//
-	// if you linked against the appropriate X libraries when you
-	// built PETSc.
-
 	ParameterVector design_variables;
 
 
 	const std::string indicator_type = "kelly";
 
+
+	// Vector of variables
+	std::vector<double> x(mesh.n_active_elem());
+
+	// Copy solution to a file
+	if (system.read_solution_from_file){
+		  std::ifstream myfile ("variables.txt");
+
+		  for (unsigned int i = 0; i<mesh.n_active_elem(); i++){
+			  myfile >> x[i];
+		  }
+	}
+	else{
+		// Initial estimation
+		for (std::vector<double>::iterator it = x.begin(); it != x.end(); it++)
+			*it = param.initial_density;
+	}
 
 	// A refinement loop.
 	for (unsigned int r_step=0; r_step<param.max_adaptivesteps; r_step++)
@@ -751,189 +755,135 @@ int main (int argc, char** argv)
 		equation_systems.print_info();
 		std::cout << "Beginning Solve " << r_step << std::endl;
 
-		// Vector of variables
-		std::vector<double> x(mesh.n_active_elem());
-
-		// Initial estimation
-		for (std::vector<double>::iterator it = x.begin(); it != x.end(); it++)
-			*it = param.initial_density;
-
-
+		// Update the kernel with the new mesh
+		std::cout<<"filtro bueno?"<<std::endl;
 		system.update_kernel();
+		std::cout<<"filtro bueno"<<std::endl;
 
-		// Transfer the value of the variables to the density field
-		// filter them if the boolean filter is true
-		bool filter = true;
-		system.transfer_densities(densities, mesh, x, filter);
+		// For the first iteration, we copy the initial estimation "x" on to the
+		// densities field
+		if (r_step == 0) {
+			bool filter = false;
+			// Transfer the value of the variables to the density field
+			// filter them if the boolean filter is true
+			system.transfer_densities(densities, x, filter);
+		}
+		// Once we have done the refinement, we need to rewrite the vector "x" with
+		// the densities field
+		else{
+			x.resize(mesh.n_active_elem());
+			densities.solution->localize(x);
+		}
 
-		// Solve system
-		system.solve();
 
-		std::cout << "System has: " << equation_systems.n_active_dofs()
-				<< " degrees of freedom."
-				<< std::endl;
 
-		std::cout << "Linear solver converged at step: "
-				<< (system.time_solver->diff_solver())->total_inner_iterations()
-				<< std::endl;
+		if (param.finite_difference){
 
-		// Get a pointer to the primal solution vector
-		NumericVector<Number> &primal_solution = *system.solution;
+			// Solve system
+			system.solve();
 
-		SensitivityData sensitivities(qois, system, system.get_parameter_vector());
+			std::cout << "System has: " << equation_systems.n_active_dofs()
+					<< " degrees of freedom."
+					<< std::endl;
 
-		// Make sure we get the contributions to the adjoint RHS from the sides
-		system.assemble_qoi_sides = true;
+			std::cout << "Linear solver converged at step: "
+					<< (system.time_solver->diff_solver())->total_inner_iterations()
+					<< std::endl;
 
-	    // We are about to solve the adjoint system, but before we do this we see the same preconditioner
-	    // flag to reuse the preconditioner from the forward solver
-		system.get_linear_solver()->reuse_preconditioner(true);
+			// Get a pointer to the primal solution vector
+			NumericVector<Number> &primal_solution = *system.solution;
 
-		// Here we solve the adjoint problem inside the adjoint_qoi_parameter_sensitivity
-		// function, so we have to set the adjoint_already_solved boolean to false
-		system.set_adjoint_already_solved(false);
+			SensitivityData sensitivities(qois, system, system.get_parameter_vector());
 
-		// Here we calculate the QoIs before the sensitivity analysis because we need it for the
-		// VonMises objective function. This QoI doesn't take into account the p-norm exponent.
-	    system.calculate_qoi(qois);
+			// Make sure we get the contributions to the adjoint RHS from the sides
+			system.assemble_qoi_sides = true;
 
-		// Compute the sensitivities
-		system.adjoint_qoi_parameter_sensitivity(qois, system.get_parameter_vector(), sensitivities);
+			// We are about to solve the adjoint system, but before we do this we see the same preconditioner
+			// flag to reuse the preconditioner from the forward solver
+			system.get_linear_solver()->reuse_preconditioner(true);
 
-//		// Now that we have solved the adjoint, set the adjoint_already_solved boolean to true, so we dont solve unneccesarily in the error estimator
-		system.set_adjoint_already_solved(true);
-//
-//		system.finite_differences_check(&densities,qois,sensitivities,system.get_parameter_vector());
-////////
-////////
-//		system.finite_differences_partial_derivatives_check(qois,system.get_parameter_vector(),sensitivities, p_norm_objectivefunction);
+			// Here we solve the adjoint problem inside the adjoint_qoi_parameter_sensitivity
+			// function, so we have to set the adjoint_already_solved boolean to false
+			system.set_adjoint_already_solved(false);
 
-//		// Number of variables for the optimizer, equal to the number of active elements, changes with each refinement
-//		dof_id_type n_variables = mesh.n_active_elem();
-//
-//		// Build optimizer
-//		nlopt::opt opt(nlopt::LD_MMA,n_variables);
-//
-//		// Set up lower bounds
-//		std::vector<double> lb(n_variables);
-//		for (std::vector<double>::iterator it = lb.begin(); it != lb.end(); it++)
-//			*it = param.minimum_density;
-//		opt.set_lower_bounds(lb);
-//
-//		// Set up upper bounds
-//		std::vector<double> ub(n_variables);
-//		for (std::vector<double>::iterator it = ub.begin(); it != ub.end(); it++)
-//			*it = 1.0;
-//		opt.set_upper_bounds(ub);
-//
-//		// Pointer to the euqtion systems to pass it to the optimizer
-//		EquationSystems * equation_systems_pointer = &equation_systems;
-//		// Attach objective function
-//		opt.set_min_objective(myfunc, equation_systems_pointer);
-//		opt.add_inequality_constraint(myvolumeconstraint, equation_systems_pointer);
-//
-//		// Set stopping criteria
-//		opt.set_xtol_rel(1e-6);
-//		opt.set_ftol_rel(1e-6);
-//
-//		// Run optimizer
-//		double minf;
-//		nlopt::result result = opt.optimize(x, minf);
+			// Here we calculate the QoIs before the sensitivity analysis because we need it for the
+			// VonMises objective function. This QoI doesn't take into account the p-norm exponent.
+			system.calculate_qoi(qois);
 
-		// Print out the H1 norm, for verification purposes: NOT IMPLEMENTED IN VECTOR ELEMENTS
-		// Real H1norm = system.calculate_norm(*system.solution, SystemNorm(H1));
+			// Compute the sensitivities
+			system.adjoint_qoi_parameter_sensitivity(qois, system.get_parameter_vector(), sensitivities);
 
-		//std::cout << "H1 norm = " << H1norm << std::endl;
+			// Now that we have solved the adjoint, set the adjoint_already_solved boolean to true, so we dont solve unneccesarily in the error estimator
+			system.set_adjoint_already_solved(true);
 
-		// Compute the error.
-		//      exact_sol.compute_error("Elasticity", "u");
-		//
-		//      // Print out the error values
-		//      std::cout << "L2-Error is: "
-		//                << exact_sol.l2_error("Elasticity", "u")
-		//                << std::endl;
-		//      std::cout << "H1-Error is: "
-		//                << exact_sol.h1_error("Elasticity", "u")
-		//                << std::endl;
-		// Possibly refine the mesh
-		std::cout << "Terminamos FD check" << std::endl;
+			system.finite_differences_check(&densities,qois,sensitivities,system.get_parameter_vector());
+			std::cout << "Terminamos FD check" << std::endl;
+			//system.finite_differences_partial_derivatives_check(qois,system.get_parameter_vector(),sensitivities, p_norm_objectivefunction);
+		}
+		else{
+			std::cout<<"beginning optimization"<<std::endl;
+
+			// Number of variables for the optimizer, equal to the number of active elements, changes with each refinement
+			dof_id_type n_variables = mesh.n_active_elem();
+
+			// Build optimizer
+			std::cout<<"beginning optimization"<<std::endl;
+			nlopt::opt opt(nlopt::LD_MMA,n_variables);
+
+			std::cout<<"beginning optimization"<<std::endl;
+			// Set up lower bounds
+			std::vector<double> lb(n_variables);
+			for (std::vector<double>::iterator it = lb.begin(); it != lb.end(); it++)
+				*it = param.minimum_density;
+			opt.set_lower_bounds(lb);
+
+			// Set up upper bounds
+			std::vector<double> ub(n_variables);
+			for (std::vector<double>::iterator it = ub.begin(); it != ub.end(); it++)
+				*it = 1.0;
+			opt.set_upper_bounds(ub);
+
+			// Pointer to the euqtion systems to pass it to the optimizer
+			EquationSystems * equation_systems_pointer = &equation_systems;
+			// Attach objective function
+			opt.set_min_objective(myfunc, equation_systems_pointer);
+			opt.add_inequality_constraint(myvolumeconstraint, equation_systems_pointer);
+
+			// Set stopping criteria
+			opt.set_xtol_rel(param.xtol_rel);
+			opt.set_ftol_rel(param.ftol_rel);
+
+			opt.set_maxeval(param.maxeval);
+
+			// Run optimizer
+			double minf;
+			std::cout<<"beginning optimization"<<std::endl;
+			nlopt::result  result = opt.optimize(x, minf);
+			std::cout<<"beginning optimization"<<std::endl;
+		}
+
 		if (r_step+1 != param.max_adaptivesteps)
 		{
 		  std::cout << "  Refining the mesh..." << std::endl;
-		  // Uniform refinement
-		  if(param.refine_uniformly)
-			{
-			  std::cout<<"Refining Uniformly"<<std::endl<<std::endl;
 
-			  mesh_refinement->uniformly_refine(1);
-			}
 		   //Adaptively refine based on reaching an error tolerance
-		          else if(param.global_tolerance >= 0. && param.nelem_target == 0.)
-		            {
-		              // Now we construct the data structures for the mesh refinement process
-		              ErrorVector error;
-
-		              // Build an error estimator object
-		              AutoPtr<ErrorEstimator> error_estimator =
-		                build_error_estimator(param,system);
-
-
-		              // Estimate the error in each element using the Adjoint Residual or Kelly error estimator
-		              error_estimator->estimate_error(system, error);
-
-		              mesh_refinement->flag_elements_by_error_tolerance (error);
-
-		              mesh_refinement->refine_and_coarsen_elements();
-		            }
-		  // Adaptively refine based on reaching a target number of elements
-		  else
-			{
-		//              // Now we construct the data structures for the mesh refinement process
-		//              ErrorVector error;
-		//
-		//              // Build an error estimator object
-		//              AutoPtr<ErrorEstimator> error_estimator =
-		//                build_error_estimator(param);
-		//
-		//              // Estimate the error in each element using the Adjoint Residual or Kelly error estimator
-		//              error_estimator->estimate_error(system, error);
-		//
-		//              if (mesh.n_active_elem() >= param.nelem_target)
-		//                {
-		//                  std::cout<<"We reached the target number of elements."<<std::endl <<std::endl;
-		//                  break;
-		//                }
-		//
-		//              mesh_refinement->flag_elements_by_nelem_target (error);
-		//
-		//              mesh_refinement->refine_and_coarsen_elements();
-
+		  if(param.global_tolerance >= 0. && param.nelem_target == 0.)
+		  {
+			  // Now we construct the data structures for the mesh refinement process
 			  ErrorVector error;
-			  libmesh_assert_equal_to (indicator_type, "kelly");
 
-			  // The Kelly error estimator is based on
-			  // an error bound for the Poisson problem
-			  // on linear elements, but is useful for
-			  // driving adaptive refinement in many problems
-			  KellyErrorEstimatorElasticity error_estimator;
+			  // Build an error estimator object
+			  AutoPtr<ErrorEstimator> error_estimator =
+				build_error_estimator(param,system);
 
-			  error_estimator.estimate_error (system, error);
-			  // Output error estimate magnitude
-			  libMesh::out << "Error estimate\nl2 norm = " << error.l2_norm() <<
-				"\nmaximum = " << error.maximum() << std::endl;
-			  // This takes the error in \p error and decides which elements
-			  // will be coarsened or refined.  Any element within 20% of the
-			  // maximum error on any element will be refined, and any
-			  // element within 10% of the minimum error on any element might
-			  // be coarsened. Note that the elements flagged for refinement
-			  // will be refined, but those flagged for coarsening _might_ be
-			  // coarsened.
-			  mesh_refinement->flag_elements_by_error_fraction (error);
 
-			  // This call actually refines and coarsens the flagged
-			  // elements.
+			  // Estimate the error in each element using the Adjoint Residual or Kelly error estimator
+			  error_estimator->estimate_error(system, error);
+
+			  mesh_refinement->flag_elements_by_error_tolerance (error);
+
 			  mesh_refinement->refine_and_coarsen_elements();
-			}
+		  }
 
 		  // This call reinitializes the \p EquationSystems object for
 		  // the newly refined mesh.  One of the steps in the
@@ -946,29 +896,26 @@ int main (int argc, char** argv)
 					<< " active elements and "
 					<< equation_systems.n_active_dofs()
 					<< " active dofs." << std::endl;
+
+
 		}
 	}
 
-	//compute_von_mises(equation_systems);
-
-
 	#ifdef LIBMESH_HAVE_EXODUS_API
-	ExodusII_IO(mesh).write_equation_systems( "out_parallel.e", equation_systems);
-	//ExodusII_IO(mesh).write_element_data(equation_systems);
-	//std::set<std::string>* system_names;
-	//std::pair<std::set<std::string>::iterator,bool> ret = system_names->insert("Densities");
-	//ExodusII_IO(mesh).write_discontinuous_exodusII("densidades.e",equation_systems,system_names);
+	// Use single precision in this case (reduces the size of the exodus file)
+	ExodusII_IO exo_io(mesh, /*single_precision=*/true);
+
+	// First plot the displacement field using a nodal plot
+	std::set<std::string> system_names;
+	system_names.insert("Elasticity");
+		exo_io.write_equation_systems("displacement_and_densities.e",equation_systems,&system_names);
+
+	// then append element-based discontinuous plots of the stresses
+		exo_io.write_element_data(equation_systems);
 	#endif
 
-	#ifdef LIBMESH_HAVE_GMV
-	GMVIO(mesh).write_equation_systems( "out.gmv", equation_systems);
-	#endif
 
-	/*
-	*
-	* PLOT GRADIENTS !!!
-	*
-	*/
+
 
 	// All done.
 	return 0;

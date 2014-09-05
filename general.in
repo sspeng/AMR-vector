@@ -4,7 +4,37 @@
 domainfile = 'lshaped.xda'
 
 # The number of uniform refinements to immediately perform on that grid
-coarserefinements = 0
+coarserefinements = 4	
+
+# The maximum number of adaptive steps per timestep
+max_adaptivesteps = 2
+
+# The greatest refinement level an element should reach.
+max_h_level = 2
+
+# Max number of refinements at each step
+refine_fraction = 0.7
+
+# Max number of coarsenings at each step
+coarsen_fraction = 0.0
+
+# Coarsen threshold factor for refinement trading
+#		The coarsen_threshold provides hysteresis in AMR/C strategies. 
+# 		Refinement of elements with error estimate E will be done even at the 
+# 		expense of coarsening elements whose children's accumulated error does not exceed coarsen_threshold * E.
+coarsen_threshold = 0.1
+
+# The global FEM error tolerance at each timestep
+# Make this nonzero to solve to a specified tolerance
+# This will probably break with KellyErrorIndicator
+# const Real global_tolerance = 1.e-3;
+#	If absolute_global_tolerance is set to a nonzero value, methods like flag_elements_by_global_tolerance() 
+#	will attempt to reduce the global error of the mesh (defined as the square root of the sum of the squares 
+#	of the errors on active elements) to below this tolerance.
+global_tolerance = 1e-1
+
+# Target patch size
+target_patch_size = 1
 
 # Should the nonlinear solver produce verbose messages?
 solver_quiet = true
@@ -19,7 +49,7 @@ relative_step_tolerance = 1.e-8
 relative_residual_tolerance = 1.e-9
 
 # What should the largest relative linear tolerance be?
-initial_linear_tolerance = 1.e-16
+initial_linear_tolerance = 1.e-8
 
 # How should it relate to the nonlinear residual in future steps?
 linear_tolerance_multiplier = 1.e-3
@@ -27,34 +57,15 @@ linear_tolerance_multiplier = 1.e-3
 # The desired number of active mesh elements
 # Make this nonzero to solve to a specified mesh size
 #nelem_target = 32798
-nelem_target = 40000
+nelem_target = 0
 
-# The global FEM error tolerance at each timestep
-# Make this nonzero to solve to a specified tolerance
-# This will probably break with KellyErrorIndicator
-# const Real global_tolerance = 1.e-3;
-global_tolerance = 0
+
 
 # Are we doing uniform refinement steps
 refine_uniformly = false
 
 # Type of indicator, refine_uniformly must be set to false for this to work
 indicator_type = 'adjoint_residual'
-
-# Max number of refinements at each step
-refine_fraction = 0.5
-
-# Max number of coarsenings at each step
-coarsen_fraction = 0.5
-
-# Coarsen threshold factor for refinement trading
-coarsen_threshold = 0
-
-# The maximum number of adaptive steps per timestep
-max_adaptivesteps = 1
-
-# The greatest refinement level an element should reach.
-max_h_level = 3
 
 # Use what finite element space?
 fe_family = LAGRANGE_VEC
@@ -75,17 +86,46 @@ initial_density = 0.5
 minimum_density = 0.001
 
 #Filter paramater
-filter_parameter = 0.2
+filter_parameter = 0.1
+
+#Optimization function tolerance
 
 # p-norm parameter
-pnorm_parameter = 4
+pnorm_parameter = 8
 
 # Elasticity modules
-lambda = 200e3
-mu = 100e3
-# REMEMBER TO CHANGE IT AS WELL IN EvalElasticity function in the code. You should create an object for this and fix the problem 
-# in PatchRecoveryElasticity
+lambda = 12
+mu = 8
+# 	REMEMBER TO CHANGE IT AS WELL IN EvalElasticity 
+# 	function in the code. You should create an object 
+#	for this and fix the problem 
+# 	in PatchRecoveryElasticity
 
 #Volume constraint
 volume_fraction_constraint = 0.5
 
+# Check sensitivities with finite difference or run the optimization
+finite_difference = false
+
+#Output each iteration to a new file?
+output_solution_to_file = false
+
+#Read initial design variable estimation from a file?
+read_solution_from_file = false
+
+#Scaling of the optimization function
+opt_scaling = 100;
+
+#Traction vertical force
+traction_force = 0.01;
+
+
+##################### OPTIMIZATION ################################
+# Function relative tolerance
+ftol_rel = 1e-6
+
+# Variable relative tolerance
+xtol_rel = 1e-9
+
+#Maximum number of iterations
+maxeval = 50

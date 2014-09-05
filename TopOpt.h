@@ -35,11 +35,7 @@ public:
 	TopOptSystem(EquationSystems& es,
                 const std::string& name_in,
                 const unsigned int number_in)
-    :  kernel_filter(this->comm()),
-       kernel_filter_parallel(this->comm()),
-		densities_filtered(this->comm()),
-		gradient_filtered(this->comm()),
-		gradient_filtered_temp(this->comm()),
+    :   kernel_filter_parallel(this->comm()),
     	FEMSystem(es, name_in, number_in),
       _fe_family("LAGRANGE_VEC"), _fe_order(1),
       _analytic_jacobians(true){ }
@@ -62,7 +58,7 @@ public:
    * Register a user function to use in computing the flux BCs.
    * The return value is std::pair<bool, Real>
    */
-  void attach_flux_bc_function (std::pair<bool,Gradient> fptr(const System& system,
+  void attach_flux_bc_function (std::pair<bool,Gradient> fptr(const TopOptSystem& system,
                                                           const Point& p,
                                                           const std::string& var_name));
 
@@ -87,6 +83,13 @@ public:
    * a vector of length equal to the number of degrees of freedom
    */
   void assemble_res_derivative (const QoISet& qoi_indices, const dof_id_type & elem_id);
+
+  /*
+   * We have several vectors that have the same structure than the densities field, but we don't have
+   * to be projected to the new refined mesh, just to be resized. This has to be called after the
+   * equations.reinit() in the AMR
+   */
+  void init_opt_vectors();
 
   NumericVector<Number> & add_resder_rhs (unsigned int i);
 
@@ -207,9 +210,9 @@ public:
   bool von_mises_qoi_bool;
 
 
-  void filter_gradient(const std::vector<Number> & gradient, ExplicitSystem & densities, std::vector<double> & grad);
+  void filter_gradient(std::vector<double> & grad);
 
-  void transfer_densities(ExplicitSystem & densities, const MeshBase & mesh, const std::vector<double> & x, const bool & filter);
+  void transfer_densities(ExplicitSystem & densities, const std::vector<double> & x, const bool & filter);
 
   /*
    * The constraint is implemented as follows
@@ -220,14 +223,11 @@ public:
    *
    * 	The gradient is just an array with the volume of the element for that gradient component
    */
-  Number calculate_volume_constraint(ExplicitSystem & densities, std::vector<double> & grad);
+  Number calculate_filtered_volume_constraint(ExplicitSystem & densities, std::vector<double> & grad);
 
   // Matrix that contains the filter to be applied to the densities
-  PetscMatrix<Number> kernel_filter, kernel_filter_parallel;
+  PetscMatrix<Number> kernel_filter_parallel;
 
-
-  // Vector that contains the filtered densities
-  PetscVector<Number> densities_filtered, gradient_filtered, gradient_filtered_temp;
 
   // Counter for the number of iterations for the optimization
   unsigned int contador = 0;
@@ -237,6 +237,13 @@ public:
 
   // Is our QoI a p-norm?
   bool p_norm_objectivefunction = false;
+
+  bool read_solution_from_file = false;
+
+  bool output_solution_to_file = false;
+
+
+  Real opt_scaling, traction_force;
 
 
 protected:
@@ -295,7 +302,7 @@ protected:
   /**
    * Pointer to function that returns BC information.
    */
-  std::pair<bool,Gradient> (* _bc_function) (const System& system,
+  std::pair<bool,Gradient> (* _bc_function) (const TopOptSystem& system,
                                          const Point& p,
                                          const std::string& var_name);
 
@@ -309,7 +316,7 @@ protected:
   friend class ResidualDerivative;
 
   // Pointer to the ResidualDerivative class
-  AutoPtr<ResidualDerivative> _res_der;
+  ResidualDerivative _res_der;
 
   // Array to hold the objective functions
   Number computed_QoI[1];

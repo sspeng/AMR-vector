@@ -17,6 +17,7 @@
 #include "libmesh/explicit_system.h"
 #include "libmesh/petsc_vector.h"
 
+
 #include <iostream>
 #include <utility>
 
@@ -210,7 +211,7 @@ public:
   bool von_mises_qoi_bool;
 
 
-  void filter_gradient(std::vector<double> & grad);
+  void filter_gradient();
 
   void transfer_densities(ExplicitSystem & densities, const std::vector<double> & x, const bool & filter);
 
@@ -223,7 +224,7 @@ public:
    *
    * 	The gradient is just an array with the volume of the element for that gradient component
    */
-  Number calculate_filtered_volume_constraint(ExplicitSystem & densities, std::vector<double> & grad);
+  Number calculate_filtered_volume_constraint(ExplicitSystem & densities);
 
   // Matrix that contains the filter to be applied to the densities
   PetscMatrix<Number> kernel_filter_parallel;
@@ -244,6 +245,8 @@ public:
 
 
   Real opt_scaling, traction_force;
+
+  Vec * dgdx;
 
 
 protected:

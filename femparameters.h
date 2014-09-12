@@ -35,7 +35,8 @@ public:
     print_jacobian_norms(false), print_jacobians(false),
     ramp_parameter(10), initial_density(0.5), minimum_density(0.001),
     filter_parameter(1.0), volume_fraction_constraint(0.5), pnorm_parameter(1),
-    finite_difference(true), opt_scaling(1.0), target_patch_size(8){}
+    finite_difference(true), opt_scaling(1.0), target_patch_size(8),
+    maximum_density(1.0), movlim(0.2){}
 
   void read(GetPot &input);
 
@@ -91,6 +92,8 @@ public:
 
 
   Number lambda, mu;
+
+  Number maximum_density, movlim;
 };
 
 #endif // __fem_parameters_h__

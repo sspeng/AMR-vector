@@ -105,6 +105,8 @@
 // Include optimizer
 #include "nlopt.hpp"
 
+#include "MMA.h"
+
 
 #include <iostream>
 #include <fstream>
@@ -535,7 +537,7 @@ double myfunc(const std::vector<double> & x, std::vector<double> & grad, void * 
     Number QoI_0_computed = system.get_QoI_value(0);
 
     // Transfer the gradient, apply filter and scale it
-    system.filter_gradient(grad);
+    system.filter_gradient();
 
     // Scale objective function
     QoI_0_computed *= system.opt_scaling;
@@ -572,7 +574,7 @@ double myvolumeconstraint(const std::vector<double> & x, std::vector<double> & g
 	system.transfer_densities(densities, x, true);
 
 
-	Number volume_constraint = system.calculate_filtered_volume_constraint(densities, grad);
+	Number volume_constraint = system.calculate_filtered_volume_constraint(densities);
 
     system.comm().barrier();
     return volume_constraint;
@@ -748,6 +750,7 @@ int main (int argc, char** argv)
 			*it = param.initial_density;
 	}
 
+
 	// A refinement loop.
 	for (unsigned int r_step=0; r_step<param.max_adaptivesteps; r_step++)
 	{
@@ -821,45 +824,150 @@ int main (int argc, char** argv)
 			//system.finite_differences_partial_derivatives_check(qois,system.get_parameter_vector(),sensitivities, p_norm_objectivefunction);
 		}
 		else{
-			std::cout<<"beginning optimization"<<std::endl;
-
 			// Number of variables for the optimizer, equal to the number of active elements, changes with each refinement
 			dof_id_type n_variables = mesh.n_active_elem();
 
-			// Build optimizer
-			std::cout<<"beginning optimization"<<std::endl;
-			nlopt::opt opt(nlopt::LD_MMA,n_variables);
 
-			std::cout<<"beginning optimization"<<std::endl;
-			// Set up lower bounds
-			std::vector<double> lb(n_variables);
-			for (std::vector<double>::iterator it = lb.begin(); it != lb.end(); it++)
-				*it = param.minimum_density;
-			opt.set_lower_bounds(lb);
 
-			// Set up upper bounds
-			std::vector<double> ub(n_variables);
-			for (std::vector<double>::iterator it = ub.begin(); it != ub.end(); it++)
-				*it = 1.0;
-			opt.set_upper_bounds(ub);
+			// Cast PetscVectors in order to obtain the raw Vec vectors
+			PetscVector<Number> * x = dynamic_cast<PetscVector<Number> *>(densities.solution.get());
+			// Create Optimizer
+			MMA *mma = new MMA(n_variables,1.0,x->vec());
+	        // Allocate after input
+			PetscScalar * gx = new PetscScalar[1];
 
-			// Pointer to the euqtion systems to pass it to the optimizer
-			EquationSystems * equation_systems_pointer = &equation_systems;
-			// Attach objective function
-			opt.set_min_objective(myfunc, equation_systems_pointer);
-			opt.add_inequality_constraint(myvolumeconstraint, equation_systems_pointer);
 
-			// Set stopping criteria
-			opt.set_xtol_rel(param.xtol_rel);
-			opt.set_ftol_rel(param.ftol_rel);
+			PetscInt itr=0;
+			PetscScalar ch = 1.0;
+			// Error code for debugging
+			PetscErrorCode ierr;
+			double t1,t2;
+			system.init_opt_vectors();
+			while (itr < param.maxeval && ch > param.xtol_rel){
+					// Update iteration counter
+					itr++;
 
-			opt.set_maxeval(param.maxeval);
+					t1 = MPI_Wtime();
 
-			// Run optimizer
-			double minf;
-			std::cout<<"beginning optimization"<<std::endl;
-			nlopt::result  result = opt.optimize(x, minf);
-			std::cout<<"beginning optimization"<<std::endl;
+					// Filter densities
+
+					system.kernel_filter_parallel.vector_mult(densities.get_vector("dens_filt"), *densities.solution.get());
+
+					// Primal Analysis
+					system.solve();
+
+					// Get a pointer to the primal solution vector
+					NumericVector<Number> &primal_solution = *system.solution;
+
+					// We are about to solve the adjoint system, but before we do this we see the same preconditioner
+					// flag to reuse the preconditioner from the forward solver
+					system.get_linear_solver()->reuse_preconditioner(true);
+
+					// Here we solve the adjoint problem inside the adjoint_qoi_parameter_sensitivity
+					// function, so we have to set the adjoint_already_solved boolean to false
+					system.set_adjoint_already_solved(false);
+
+					// Here we calculate the QoIs before the sensitivity analysis because we need it for the
+					// VonMises objective function. This QoI doesn't take into account the p-norm exponent.
+					system.calculate_qoi(qois);
+
+					// Compute the sensitivities
+					SensitivityData sensitivities(qois, system, system.get_parameter_vector());
+					system.adjoint_qoi_parameter_sensitivity(qois, system.get_parameter_vector(), sensitivities);
+
+					// Now that we have solved the adjoint, set the adjoint_already_solved boolean to true, so we dont solve unneccesarily in the error estimator
+					system.set_adjoint_already_solved(true);
+
+					// Filter sensitivities, now the sensitivities is in get_vector("grad_filt")
+				    system.filter_gradient();
+
+					// Get constraint value and the filtered sensitivities, stored in get_vector("vol_grad_filt")
+					Number volume_constraint = system.calculate_filtered_volume_constraint(densities);
+
+
+					// Cast PetscVectors in order to obtain the raw Vec vectors
+					PetscVector<Number> & xmin 			= dynamic_cast<PetscVector<Number> & >(densities.get_vector("xmin"));
+					PetscVector<Number> & xmax 			= dynamic_cast<PetscVector<Number> & >(densities.get_vector("xmax"));
+					PetscVector<Number> & xold 			= dynamic_cast<PetscVector<Number> & >(densities.get_vector("xold"));
+					PetscVector<Number> & gradient 		= dynamic_cast<PetscVector<Number> & >(densities.get_vector("grad"));
+					PetscVector<Number> & vol_gradient 	= dynamic_cast<PetscVector<Number> & >(densities.get_vector("vol_grad_filt"));
+					gx[0] = volume_constraint;
+					// Sets outer movelimits on design variables
+					ierr = mma->SetOuterMovelimit(param.minimum_density,
+													param.maximum_density,
+													param.movlim,
+													x->vec(),xmin.vec(),xmax.vec()); CHKERRQ(ierr);
+
+					// I need to copy the content of vol_gradient into dgdx
+					VecCopy(vol_gradient.vec(), system.dgdx[0]);
+
+					// Update design by MMA
+					ierr = mma->Update(x->vec(),gradient.vec(),gx,system.dgdx,xmin.vec(),xmax.vec()); CHKERRQ(ierr);
+					// Update the solution field in densities
+					densities.update();
+					// Inf norm on the design change
+					ch = mma->DesignChange(x->vec(),xold.vec());
+
+
+					// stop timer
+					t2 = MPI_Wtime();
+					// Print to screen
+					PetscPrintf(PETSC_COMM_WORLD,"It.: %i, obj.: %f, g[0]: %f, ch.: %f, time: %f\n",
+								itr,system.get_QoI_value(0),volume_constraint, ch,t2-t1);
+
+					if (itr % 10 == 0) {
+						densities.solution->print_global();
+					}
+
+			  }
+
+			  // Clean up
+			  delete mma;
+			  delete [] gx ;
+			  // Reinit the array Vec dgdx
+			  if (system.dgdx!=NULL){ VecDestroyVecs(1.0,&system.dgdx); }
+
+
+
+
+
+
+//
+//
+//			// Build optimizer
+//			std::cout<<"beginning optimization"<<std::endl;
+//			nlopt::opt opt(nlopt::LD_MMA,n_variables);
+//
+//			std::cout<<"beginning optimization"<<std::endl;
+//			// Set up lower bounds
+//			std::vector<double> lb(n_variables);
+//			for (std::vector<double>::iterator it = lb.begin(); it != lb.end(); it++)
+//				*it = param.minimum_density;
+//			opt.set_lower_bounds(lb);
+//
+//			// Set up upper bounds
+//			std::vector<double> ub(n_variables);
+//			for (std::vector<double>::iterator it = ub.begin(); it != ub.end(); it++)
+//				*it = 1.0;
+//			opt.set_upper_bounds(ub);
+//
+//			// Pointer to the euqtion systems to pass it to the optimizer
+//			EquationSystems * equation_systems_pointer = &equation_systems;
+//			// Attach objective function
+//			opt.set_min_objective(myfunc, equation_systems_pointer);
+//			opt.add_inequality_constraint(myvolumeconstraint, equation_systems_pointer);
+//
+//			// Set stopping criteria
+//			opt.set_xtol_rel(param.xtol_rel);
+//			opt.set_ftol_rel(param.ftol_rel);
+//
+//			opt.set_maxeval(param.maxeval);
+//
+//			// Run optimizer
+//			double minf;
+//			std::cout<<"beginning optimization"<<std::endl;
+//			//nlopt::result  result = opt.optimize(x, minf);
+//			std::cout<<"beginning optimization"<<std::endl;
 		}
 
 		if (r_step+1 != param.max_adaptivesteps)
@@ -897,7 +1005,7 @@ int main (int argc, char** argv)
 					<< equation_systems.n_active_dofs()
 					<< " active dofs." << std::endl;
 
-
+		  system.init_opt_vectors();
 		}
 	}
 

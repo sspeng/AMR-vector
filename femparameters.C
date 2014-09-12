@@ -40,6 +40,10 @@ void FEMParameters::read(GetPot &input)
   GETPOT_INPUT(lambda);
   GETPOT_INPUT(mu);
 
+  GETPOT_INPUT(maximum_density);
+
+  GETPOT_INPUT(movlim);
+
   GETPOT_INPUT(volume_fraction_constraint);
 
   GETPOT_INPUT(finite_difference);

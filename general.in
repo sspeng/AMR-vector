@@ -4,13 +4,13 @@
 domainfile = 'lshaped.xda'
 
 # The number of uniform refinements to immediately perform on that grid
-coarserefinements = 4	
+coarserefinements = 5	
 
 # The maximum number of adaptive steps per timestep
-max_adaptivesteps = 2
+max_adaptivesteps = 4
 
 # The greatest refinement level an element should reach.
-max_h_level = 2
+max_h_level = 3
 
 # Max number of refinements at each step
 refine_fraction = 0.7
@@ -31,7 +31,7 @@ coarsen_threshold = 0.1
 #	If absolute_global_tolerance is set to a nonzero value, methods like flag_elements_by_global_tolerance() 
 #	will attempt to reduce the global error of the mesh (defined as the square root of the sum of the squares 
 #	of the errors on active elements) to below this tolerance.
-global_tolerance = 1e-1
+global_tolerance = 1e-3
 
 # Target patch size
 target_patch_size = 1
@@ -77,16 +77,22 @@ print_solution_norms = false
 print_solutions = false
 
 #Ramp parameter
-ramp_parameter = 20
+ramp_parameter = 30
 
 #Initial density
 initial_density = 0.5
 
 #Minimum density value to avoid singularities 
-minimum_density = 0.001
+minimum_density = 0.0001
+
+#Maximum density value
+maximum_density = 1.0
+
+#Maximum change in the variables value
+movlim = 0.01
 
 #Filter paramater
-filter_parameter = 0.1
+filter_parameter = 0.05
 
 #Optimization function tolerance
 
@@ -102,7 +108,7 @@ mu = 8
 # 	in PatchRecoveryElasticity
 
 #Volume constraint
-volume_fraction_constraint = 0.5
+volume_fraction_constraint = 0.6
 
 # Check sensitivities with finite difference or run the optimization
 finite_difference = false
@@ -128,4 +134,4 @@ ftol_rel = 1e-6
 xtol_rel = 1e-9
 
 #Maximum number of iterations
-maxeval = 50
+maxeval = 100

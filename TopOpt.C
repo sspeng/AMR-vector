@@ -389,6 +389,16 @@ void TopOptSystem::init_opt_vectors ()
     vol_grad_filt << "vol_grad_filt";
     densities.add_vector(vol_grad_filt.str(),false,PARALLEL);
 
+    // Vectors with same structure than the densities field.
+    // Necessary for MMA
+    densities.add_vector("xmin", false, PARALLEL);
+    densities.add_vector("xmax", false, PARALLEL);
+    densities.add_vector("xold", false, PARALLEL);
+
+
+	PetscErrorCode ierr;
+    PetscVector<Number> & xold 			= dynamic_cast<PetscVector<Number> & >(densities.get_vector("xold"));
+	ierr = VecDuplicateVecs(xold.vec(),1.0, &dgdx);
 
 
 	// Add the kernel matrix
@@ -643,8 +653,7 @@ void TopOptSystem::EvalElasticity(DenseMatrix<Real> & CMat) {
 	CMat(0,3) = _lambda;
 }
 
-void
-TopOptSystem::attach_flux_bc_function (std::pair<bool,Gradient> fptr(const TopOptSystem& ,
+void TopOptSystem::attach_flux_bc_function (std::pair<bool,Gradient> fptr(const TopOptSystem& ,
                                                                         const Point& ,
                                                                         const std::string&))
 {
@@ -657,8 +666,7 @@ TopOptSystem::attach_flux_bc_function (std::pair<bool,Gradient> fptr(const TopOp
     integrate_boundary_sides = false;
 }
 
-void
-TopOptSystem::attach_body_force (Gradient fptr(const Point& ,const std::string& ))
+void TopOptSystem::attach_body_force (Gradient fptr(const Point& ,const std::string& ))
 {
   _body_force = fptr;
 
@@ -710,9 +718,6 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 	{
 	  this->adjoint_solve(qoi_indices);
 	}
-
-	// Get ready to fill in senstivities:
-	sensitivities.allocate_data(qoi_indices, *this, parameters);
 
 	// We use the identities:
 	// dq/dp = (partial q / partial p) + (partial q / partial u) *
@@ -799,39 +804,21 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 				this->get_dof_map().enforce_constraints_exactly
 				  (*this, lift_func.get(),
 				   /* homogeneous = */ false);
-//				sensitivities[i][densities_index[0]] = partialq_partialp[i] -
-//				  partialR_partialp->dot(*lift_func) -
-//				  partialR_partialp->dot(this->get_adjoint_solution(i));
 
+					Number sensitivity = parameter_derivative -
+							this->get_resder_rhs(0).dot(*lift_func) -
+							this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
 
-				Number sensitivity = parameter_derivative -
-						this->get_resder_rhs(0).dot(*lift_func) -
-						this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
-
-
-				sensitivities[i][densities_index[0]] = parameter_derivative -
-					this->get_resder_rhs(0).dot(*lift_func) -
-					this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
-
-
-				gradient.set(densities_index[0], sensitivity);
+					gradient.set(densities_index[0], sensitivity);
 				}
 				else{
-//				sensitivities[i][densities_index[0]] = partialq_partialp[i] -
-//				partialR_partialp->dot(this->get_adjoint_solution(i));
-//
-//				std::cout<<"Sensitivities with FD"<<std::endl;
-//				std::cout<<sensitivities[i][densities_index[0]]<<std::endl;
 
-				Number sensitivity = parameter_derivative -
-						this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
+					Number sensitivity = parameter_derivative -
+							this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
 
-				gradient.set(densities_index[0], sensitivity);
-				sensitivities[i][densities_index[0]] = parameter_derivative -
-				this->get_resder_rhs(0).dot(*local_copy_adjoint_soln);
+					gradient.set(densities_index[0], sensitivity);
 
-//				std::cout<<"Sensitivities with analytical"<<std::endl;
-//				std::cout<<sensitivities[i][densities_index[0]]<<std::endl;
+
 				}
 			}
 	}
@@ -1355,6 +1342,7 @@ void TopOptSystem::calculate_qoi(const QoISet &qoi_indices)
 
   computed_QoI[0] *= this->opt_scaling;
 
+
 }
 
 void TopOptSystem::finite_differences_check(ExplicitSystem * densities,
@@ -1513,7 +1501,7 @@ void TopOptSystem::transfer_densities(ExplicitSystem & densities, const std::vec
 
 }
 
-void TopOptSystem::filter_gradient(std::vector<double> & grad){
+void TopOptSystem::filter_gradient(){
 
 
 	ExplicitSystem & densities =this->get_equation_systems().get_system<ExplicitSystem>("Densities");
@@ -1533,17 +1521,9 @@ void TopOptSystem::filter_gradient(std::vector<double> & grad){
 
 	gradient_filtered.close();
 
-	// No need to do any scaling because we already do it at adjoint_qoi_parameter_sensitivity
-
-	// The filtered gradient is gradient_filtered_temp, copy them back to the sensitivities
-	gradient_filtered.localize(grad);
-
-
-
-
 }
 
-Number TopOptSystem::calculate_filtered_volume_constraint(ExplicitSystem & densities, std::vector<double> & grad){
+Number TopOptSystem::calculate_filtered_volume_constraint(ExplicitSystem & densities){
 
 
 	// Sensitivities have been updated with the filter
@@ -1564,6 +1544,8 @@ Number TopOptSystem::calculate_filtered_volume_constraint(ExplicitSystem & densi
 
     NumericVector<Number> & volume_gradient = densities.get_vector(vol_grad.str());
     NumericVector<Number> & volume_gradient_filtered = densities.get_vector(vol_grad_filt.str());
+
+
 	for ( ; el != end_el ; ++el){
 		const Elem * elem = *el;
 		densities.get_dof_map().dof_indices (elem, densities_index, density_var);
@@ -1571,21 +1553,19 @@ Number TopOptSystem::calculate_filtered_volume_constraint(ExplicitSystem & densi
 		Number elem_volume = elem->volume();
 		total_volume += elem_volume;
 		current_volume += density[0]*elem_volume;
-
-		volume_gradient.set(densities_index[0],1.0);
+		volume_gradient.set(densities_index[0],elem_volume);
 	}
 
 	volume_gradient.close();
 
 	// Perform product of gradient_filtered_temp = (kernel_filter_parallel)^T * gradient_filtered (right now they're just the derivatives)
+	volume_gradient_filtered.zero();
 	volume_gradient_filtered.add_vector_transpose(volume_gradient, kernel_filter_parallel);
-
-	volume_gradient_filtered.localize(grad);
 
 	// We need to collect both the current_volume and total_volume from all processors
 	this->comm().sum(current_volume);
 	this->comm().sum(total_volume);
-	Number volume_fraction = current_volume / total_volume - volume_fraction_constraint;
+	Number volume_fraction = current_volume - volume_fraction_constraint*total_volume;
 
 	return volume_fraction;
 

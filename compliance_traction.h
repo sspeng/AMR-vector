@@ -37,13 +37,13 @@ public:
                                                                           const Point& ,
                                                                           const std::string&));
 
-  virtual void element_qoi_for_FD (AutoPtr<NumericVector<Number> > & local_solution,
-											AutoPtr<NumericVector<Number> >& densities_vector,
+  virtual void element_qoi_for_FD (UniquePtr<NumericVector<Number> > & local_solution,
+											UniquePtr<NumericVector<Number> >& densities_vector,
 													const Elem * elem,
 													DiffContext & context, Number & qoi_computed);
 
-  virtual AutoPtr<DifferentiableQoI> clone( ) {
-    return AutoPtr<DifferentiableQoI> ( new ComplianceTraction(*this) );
+  virtual UniquePtr<DifferentiableQoI> clone( ) {
+    return UniquePtr<DifferentiableQoI> ( new ComplianceTraction(*this) );
   }
 
 protected:

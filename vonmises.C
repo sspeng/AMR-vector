@@ -275,7 +275,7 @@ void VonMisesPnorm::element_qoi_derivative_parameter (DiffContext &context, Numb
 
 
 	// Derivatives of the rlement basis functions
-	const std::vector<std::vector<RealTensor> > &dphi = elem_fe->get_dphi();
+	//const std::vector<std::vector<RealTensor> > &dphi = elem_fe->get_dphi();
 
 
 	/*
@@ -371,8 +371,8 @@ void VonMisesPnorm::element_qoi_derivative_parameter (DiffContext &context, Numb
 
 }
 
-void VonMisesPnorm::element_qoi_for_FD (AutoPtr<NumericVector<Number> > & local_solution,
-										AutoPtr<NumericVector<Number> >& densities_vector,
+void VonMisesPnorm::element_qoi_for_FD (UniquePtr<NumericVector<Number> > & local_solution,
+										UniquePtr<NumericVector<Number> >& densities_vector,
 										const Elem * elem,
 										DiffContext & context, Number & qoi_computed)
 {
@@ -437,7 +437,7 @@ void VonMisesPnorm::element_qoi_for_FD (AutoPtr<NumericVector<Number> > & local_
 	std::vector<Number> density;
 	unsigned int density_var = _densities->variable_number ("rho");
 	// Get dof indices
-	const DofMap& dof_map_densities = _densities->get_dof_map();
+	//const DofMap& dof_map_densities = _densities->get_dof_map();
 	_densities->get_dof_map().dof_indices(elem, densities_index, density_var);
 	// Get the value, stored in density
 	densities_vector->get(densities_index, density);

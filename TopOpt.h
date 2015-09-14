@@ -36,10 +36,11 @@ public:
 	TopOptSystem(EquationSystems& es,
                 const std::string& name_in,
                 const unsigned int number_in)
-    :   kernel_filter_parallel(this->comm()),
-    	FEMSystem(es, name_in, number_in),
+    :   FEMSystem(es, name_in, number_in),
+    	kernel_filter_parallel(this->comm()),
       _fe_family("LAGRANGE_VEC"), _fe_order(1),
-      _analytic_jacobians(true){ }
+      _analytic_jacobians(true){
+	}
 
   std::string & fe_family() { return _fe_family;  }
   unsigned int & fe_order() { return _fe_order;  }
@@ -336,6 +337,22 @@ protected:
   bool integrate_boundary_sides = false;
   // Contributions from body force?
   bool integrate_body_force = false;
+
+  /*
+   *
+   * Stiffness matrix recycling
+   *
+   *
+   */
+
+  /*
+   * Initial stiffness matrix we will reuse
+   */
+  DenseMatrix<Number> K_initial;
+  Number detJ_initial, rho_initial;
+  bool _is_K_initial_calculated;
+
+  PerfLog perf_log;
 };
 
 #endif

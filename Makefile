@@ -2,7 +2,8 @@
 #
 # Template libMesh application Makefile
 LIBMESH_DIR ?= /usr/local
-
+PETSC_DIR = /home/miguel/petsc-3.5.3
+PETSC_ARCH = linux-mpich-opt
 
 # include the library options determined by configure
 include ./Make.common
@@ -37,7 +38,7 @@ all:: $(notdir $(target))
 $(notdir $(target)): $(objects)
 	@echo "Linking "$@"..."
 	@$(libmesh_LIBTOOL) --tag=CXX $(LIBTOOLFLAGS) --mode=link \
-	  $(libmesh_CXX) $(libmesh_CXXFLAGS) $(objects) -o $@ $(libmesh_LIBS) -lnlopt_cxx $(libmesh_LDFLAGS) $(EXTERNAL_FLAGS)
+	  $(libmesh_CXX) $(libmesh_CXXFLAGS) $(objects) -o $@ $(libmesh_LIBS) $(libmesh_LDFLAGS) $(EXTERNAL_FLAGS)
 
 
 # Useful rules.

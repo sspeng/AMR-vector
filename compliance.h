@@ -29,8 +29,8 @@ public:
 
   void attach_body_force (Gradient fptr(const Point& p,const std::string& var_name));
 
-  virtual AutoPtr<DifferentiableQoI> clone( ) {
-    return AutoPtr<DifferentiableQoI> ( new Compliance(*this) );
+  virtual UniquePtr<DifferentiableQoI> clone( ) {
+    return UniquePtr<DifferentiableQoI> ( new Compliance(*this) );
   }
 
 protected:

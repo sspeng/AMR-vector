@@ -103,8 +103,6 @@
 #include "compliance_traction.h"
 
 // Include optimizer
-#include "nlopt.hpp"
-
 #include "MMA.h"
 
 
@@ -154,7 +152,7 @@ void EvalElasticity(DenseMatrix<Real> & CMat) {
 }
 
 std::pair<bool,Tensor> stress_function (const System& ,
-                                       	 const Point& p,
+                                       	 const Point& ,
                                        	 const std::string&,
                                        	 const dof_id_type & ,
                                        	 const ParameterVector & ,
@@ -208,12 +206,12 @@ void set_system_parameters(TopOptSystem &system, FEMParameters &param)
 
   // No transient time solver
   system.time_solver =
-    AutoPtr<TimeSolver>(new SteadySolver(system));
+		  UniquePtr<TimeSolver>(new SteadySolver(system));
 
   // Nonlinear solver options
   {
     NewtonSolver *solver = new NewtonSolver(system);
-    system.time_solver->diff_solver() = AutoPtr<DiffSolver>(solver);
+    system.time_solver->diff_solver() = UniquePtr<DiffSolver>(solver);
 
     solver->quiet                       = param.solver_quiet;
     solver->max_nonlinear_iterations    = param.max_nonlinear_iterations;
@@ -270,12 +268,12 @@ void compute_von_mises(EquationSystems & es){
 
 	  const DofMap& dof_map = system.get_dof_map();
 	  FEType fe_type = dof_map.variable_type(u_var);
-	  AutoPtr<FEVectorBase> fe (FEVectorBase::build(dim, fe_type));
+	  UniquePtr<FEVectorBase> fe (FEVectorBase::build(dim, fe_type));
 	  QGauss qrule (dim, fe_type.default_quadrature_order());
 	  fe->attach_quadrature_rule (&qrule);
 
-	  const std::vector<Real>& JxW = fe->get_JxW();
-	  const std::vector<std::vector<RealTensor> >& dphi = fe->get_dphi();
+	  //const std::vector<Real>& JxW = fe->get_JxW();
+	  //const std::vector<std::vector<RealTensor> >& dphi = fe->get_dphi();
 
 	  // Also, get a reference to the vonmises. DofMap to set the value
 	  ExplicitSystem& vonmises = es.get_system<ExplicitSystem>("VonMises");
@@ -305,7 +303,7 @@ void compute_von_mises(EquationSystems & es){
 	  MeshBase::const_element_iterator       el     = mesh.active_local_elements_begin();
 	  const MeshBase::const_element_iterator end_el = mesh.active_local_elements_end();
 
-	  AutoPtr<DiffContext> con = system.build_context();
+	  UniquePtr<DiffContext> con = system.build_context();
 	  FEMContext &_femcontext = libmesh_cast_ref<FEMContext&>(*con);
 	  system.init_context(_femcontext);
 
@@ -383,10 +381,10 @@ void compute_von_mises(EquationSystems & es){
 
 #ifdef LIBMESH_ENABLE_AMR
 
-AutoPtr<MeshRefinement> build_mesh_refinement(MeshBase &mesh,
+UniquePtr<MeshRefinement> build_mesh_refinement(MeshBase &mesh,
                                               FEMParameters &param)
 {
-  AutoPtr<MeshRefinement> mesh_refinement(new MeshRefinement(mesh));
+	UniquePtr<MeshRefinement> mesh_refinement(new MeshRefinement(mesh));
   mesh_refinement->coarsen_by_parents() = true;
   mesh_refinement->absolute_global_tolerance() = param.global_tolerance;
   mesh_refinement->nelem_target()      = param.nelem_target;
@@ -410,9 +408,9 @@ AutoPtr<MeshRefinement> build_mesh_refinement(MeshBase &mesh,
 // forward and adjoint weights. The H1 seminorm component of the error is used
 // as dictated by the weak form the Laplace equation.
 
-AutoPtr<ErrorEstimator> build_error_estimator(FEMParameters &param, TopOptSystem & system)
+UniquePtr<ErrorEstimator> build_error_estimator(FEMParameters &param, TopOptSystem &)
 {
-  AutoPtr<ErrorEstimator> error_estimator;
+  UniquePtr<ErrorEstimator> error_estimator;
 
   if (param.indicator_type == "kelly")
     {
@@ -471,12 +469,12 @@ Gradient body_force (const Point&,
 
 
 
-double myfunc(const std::vector<double> & x, std::vector<double> & grad, void * f_data){
+double myfunc(const std::vector<double> & x, std::vector<double> & , void * f_data){
 
 	EquationSystems * equation_systems = (EquationSystems *) f_data;
 
 	// Grab mesh
-	const MeshBase & mesh = equation_systems->get_mesh();
+	//const MeshBase & mesh = equation_systems->get_mesh();
 	// Grab systems
 	TopOptSystem & system = equation_systems->get_system<TopOptSystem>("Elasticity");
 	ExplicitSystem & densities = equation_systems->get_system<ExplicitSystem>("Densities");
@@ -558,12 +556,12 @@ double myfunc(const std::vector<double> & x, std::vector<double> & grad, void * 
 }
 
 
-double myvolumeconstraint(const std::vector<double> & x, std::vector<double> & grad, void * f_data){
+double myvolumeconstraint(const std::vector<double> & x, std::vector<double> &, void * f_data){
 
 	EquationSystems * equation_systems = (EquationSystems *) f_data;
 
 	// Grab mesh
-	const MeshBase & mesh = equation_systems->get_mesh();
+	//const MeshBase & mesh = equation_systems->get_mesh();
 	// Grab systems
 	TopOptSystem & system = equation_systems->get_system<TopOptSystem>("Elasticity");
 	ExplicitSystem & densities = equation_systems->get_system<ExplicitSystem>("Densities");
@@ -582,6 +580,7 @@ double myvolumeconstraint(const std::vector<double> & x, std::vector<double> & g
 
 int main (int argc, char** argv)
 {
+
 	// Initialize libraries.
 	LibMeshInit init (argc, argv);
 
@@ -612,7 +611,7 @@ int main (int argc, char** argv)
 	std::cout << "Running " << argv[0];
 	// Printing put input options
 	for (int i=1; i<argc; i++)
-	std::cout << " " << argv[i];
+		std::cout << " " << argv[i];
 
 	std::cout << std::endl << std::endl;
 
@@ -621,18 +620,18 @@ int main (int argc, char** argv)
 
 	std::cout << "Reading in and building the mesh" << std::endl;
 	const unsigned int dim = 2;
+
 	// Create a mesh, with dimension to be overridden later, on the
 	// default MPI communicator.
 	Mesh mesh(init.comm(),dim);
 
 	// And an object to refine it
-	AutoPtr<MeshRefinement> mesh_refinement =
-	build_mesh_refinement(mesh, param);
+	UniquePtr<MeshRefinement> mesh_refinement = build_mesh_refinement(mesh, param);
 
 	// Read in the mesh
 	mesh.read(param.domainfile.c_str());
 
-	bool p_norm_objectivefunction = false;
+	//bool p_norm_objectivefunction = false;
 
 	// Create an equation systems object.
 	EquationSystems equation_systems (mesh);
@@ -640,6 +639,7 @@ int main (int argc, char** argv)
 
 	// Build an auxiliary explicit system for the densities
 	ExplicitSystem & densities = equation_systems.add_system<ExplicitSystem> ("Densities");
+
 	// Add a zeroth order monomial variable that will represent the densities
 	densities.add_variable("rho", CONSTANT, MONOMIAL);
 
@@ -666,9 +666,6 @@ int main (int argc, char** argv)
 	// on the coarse grid read in from lshaped.xda
 	MeshRefinement initial_uniform_refinements(mesh);
 	initial_uniform_refinements.uniformly_refine(param.coarserefinements);
-
-
-
 
 	// Set its parameters
 	set_system_parameters(system, param);
@@ -794,7 +791,7 @@ int main (int argc, char** argv)
 					<< std::endl;
 
 			// Get a pointer to the primal solution vector
-			NumericVector<Number> &primal_solution = *system.solution;
+			//NumericVector<Number> &primal_solution = *system.solution;
 
 			SensitivityData sensitivities(qois, system, system.get_parameter_vector());
 
@@ -843,7 +840,7 @@ int main (int argc, char** argv)
 			PetscErrorCode ierr;
 			double t1,t2;
 			system.init_opt_vectors();
-			while (itr < param.maxeval && ch > param.xtol_rel){
+			while ((unsigned int) itr < param.maxeval && ch > param.xtol_rel){
 					// Update iteration counter
 					itr++;
 
@@ -857,7 +854,7 @@ int main (int argc, char** argv)
 					system.solve();
 
 					// Get a pointer to the primal solution vector
-					NumericVector<Number> &primal_solution = *system.solution;
+					//NumericVector<Number> &primal_solution = *system.solution;
 
 					// We are about to solve the adjoint system, but before we do this we see the same preconditioner
 					// flag to reuse the preconditioner from the forward solver
@@ -927,47 +924,6 @@ int main (int argc, char** argv)
 			  // Reinit the array Vec dgdx
 			  if (system.dgdx!=NULL){ VecDestroyVecs(1.0,&system.dgdx); }
 
-
-
-
-
-
-//
-//
-//			// Build optimizer
-//			std::cout<<"beginning optimization"<<std::endl;
-//			nlopt::opt opt(nlopt::LD_MMA,n_variables);
-//
-//			std::cout<<"beginning optimization"<<std::endl;
-//			// Set up lower bounds
-//			std::vector<double> lb(n_variables);
-//			for (std::vector<double>::iterator it = lb.begin(); it != lb.end(); it++)
-//				*it = param.minimum_density;
-//			opt.set_lower_bounds(lb);
-//
-//			// Set up upper bounds
-//			std::vector<double> ub(n_variables);
-//			for (std::vector<double>::iterator it = ub.begin(); it != ub.end(); it++)
-//				*it = 1.0;
-//			opt.set_upper_bounds(ub);
-//
-//			// Pointer to the euqtion systems to pass it to the optimizer
-//			EquationSystems * equation_systems_pointer = &equation_systems;
-//			// Attach objective function
-//			opt.set_min_objective(myfunc, equation_systems_pointer);
-//			opt.add_inequality_constraint(myvolumeconstraint, equation_systems_pointer);
-//
-//			// Set stopping criteria
-//			opt.set_xtol_rel(param.xtol_rel);
-//			opt.set_ftol_rel(param.ftol_rel);
-//
-//			opt.set_maxeval(param.maxeval);
-//
-//			// Run optimizer
-//			double minf;
-//			std::cout<<"beginning optimization"<<std::endl;
-//			//nlopt::result  result = opt.optimize(x, minf);
-//			std::cout<<"beginning optimization"<<std::endl;
 		}
 
 		if (r_step+1 != param.max_adaptivesteps)
@@ -981,7 +937,7 @@ int main (int argc, char** argv)
 			  ErrorVector error;
 
 			  // Build an error estimator object
-			  AutoPtr<ErrorEstimator> error_estimator =
+			  UniquePtr<ErrorEstimator> error_estimator =
 				build_error_estimator(param,system);
 
 
@@ -1021,8 +977,6 @@ int main (int argc, char** argv)
 	// then append element-based discontinuous plots of the stresses
 		exo_io.write_element_data(equation_systems);
 	#endif
-
-
 
 
 	// All done.

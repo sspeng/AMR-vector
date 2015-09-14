@@ -4,13 +4,13 @@
 domainfile = 'lshaped.xda'
 
 # The number of uniform refinements to immediately perform on that grid
-coarserefinements = 5	
+coarserefinements = 0	
 
 # The maximum number of adaptive steps per timestep
-max_adaptivesteps = 4
+max_adaptivesteps = 1
 
 # The greatest refinement level an element should reach.
-max_h_level = 3
+max_h_level = 2
 
 # Max number of refinements at each step
 refine_fraction = 0.7
@@ -111,13 +111,13 @@ mu = 8
 volume_fraction_constraint = 0.6
 
 # Check sensitivities with finite difference or run the optimization
-finite_difference = false
+finite_difference = true
 
 #Output each iteration to a new file?
 output_solution_to_file = false
 
 #Read initial design variable estimation from a file?
-read_solution_from_file = false
+read_solution_from_file = true
 
 #Scaling of the optimization function
 opt_scaling = 100;

@@ -31,12 +31,16 @@
 
 #include "libmesh/mesh_function.h"
 
+#include "libmesh/perf_log.h"
+
 
 
 // Local includes
 #include "TopOpt.h"
 #include "resder.h"
 #include <math.h>
+
+
 
 
 // Bring in everything from the libMesh namespace
@@ -237,7 +241,7 @@ public:
    */
   void operator()(const ConstElemRange &range) const
   {
-    AutoPtr<DiffContext> con = _sys.build_context();
+    UniquePtr<DiffContext> con = _sys.build_context();
     FEMContext &_femcontext = libmesh_cast_ref<FEMContext&>(*con);
     _res_der.init_context(_femcontext,_sys);
 
@@ -360,6 +364,10 @@ void TopOptSystem::init_data ()
 	// Do the parent's initialization after variables are defined
 	FEMSystem::init_data();
 
+	_is_K_initial_calculated = false;
+	detJ_initial = 1.0;
+	rho_initial = 1.0;
+
 	this->time_evolving(0);
 }
 
@@ -396,9 +404,9 @@ void TopOptSystem::init_opt_vectors ()
     densities.add_vector("xold", false, PARALLEL);
 
 
-	PetscErrorCode ierr;
+	//PetscErrorCode ierr;
     PetscVector<Number> & xold 			= dynamic_cast<PetscVector<Number> & >(densities.get_vector("xold"));
-	ierr = VecDuplicateVecs(xold.vec(),1.0, &dgdx);
+	VecDuplicateVecs(xold.vec(),1.0, &dgdx);
 
 
 	// Add the kernel matrix
@@ -465,6 +473,7 @@ void TopOptSystem::init_context(DiffContext &context)
 bool TopOptSystem::element_time_derivative (bool request_jacobian,
                                              DiffContext &context)
 {
+
   // Are the jacobians specified analytically ?
   bool compute_jacobian = request_jacobian && _analytic_jacobians;
 
@@ -498,13 +507,15 @@ bool TopOptSystem::element_time_derivative (bool request_jacobian,
   DenseMatrix<Number> &K = c.get_elem_jacobian();
   DenseVector<Number> &F = c.get_elem_residual();
 
-  // Zero the matrices used to build the stiffness matrix
-  K.zero();
-  F.zero();
-  Nhat.zero();
-  DNhat.zero();
-  CMat.zero();
-  stress_flux_vect.zero();
+  if (!_is_K_initial_calculated){
+	  // Zero the matrices used to build the stiffness matrix
+	  K.zero();
+	  F.zero();
+	  Nhat.zero();
+	  DNhat.zero();
+	  CMat.zero();
+	  stress_flux_vect.zero();
+  }
 
 
   // Now we will build the element Jacobian and residual.
@@ -535,23 +546,42 @@ bool TopOptSystem::element_time_derivative (bool request_jacobian,
   // Apply ramp
   ramp(density[0]);
 
+  perf_log.push("Stiffness Matrix");
+  if (!_is_K_initial_calculated){
+	  for (unsigned int qp=0; qp<n_qpoints; qp++){
+		  // Write shape function matrices
+		  ElasticityTools::DNHatMatrix( DNhat, dim, dphi, qp);
+		  // Evaluate elasticity tensor
+		  EvalElasticity(CMat);
+		  // Evaluate element contribution
+		  Temp = DNhat;
+		  Temp.right_multiply(CMat);
+		  Temp.right_multiply_transpose(DNhat);
+		  Temp *= density[0];
+
+		  K.add(JxW[qp],Temp);
+
+	  }
+  }
+  perf_log.pop("Stiffness Matrix");
+
+  // Evaluate elasticity tensor
+  EvalElasticity(CMat);
+
   for (unsigned int qp=0; qp<n_qpoints; qp++){
 	  // Write shape function matrices
  	  ElasticityTools::DNHatMatrix( DNhat, dim, dphi, qp);
  	  ElasticityTools::NHatMatrix( Nhat, dim,  phi, qp);
- 	  // Evaluate elasticity tensor
- 	  EvalElasticity(CMat);
- 	  // Evaluate element contribution
- 	  Temp = DNhat;
- 	  Temp.right_multiply(CMat);
- 	  Temp.right_multiply_transpose(DNhat);
- 	  Temp *= density[0];
- 	  K.add(JxW[qp],Temp);
 
  	  // Get gradient, we need it for the residual
       Tensor grad_u;
 
+
+
       c.interior_gradient( u_var, qp, grad_u );
+
+//      std::cout<<"qp = "<<qp<<std::endl;
+//      grad_u.print();
 
       gradU(0) = grad_u(0,0);
       gradU(1) = grad_u(1,0);
@@ -580,6 +610,27 @@ bool TopOptSystem::element_time_derivative (bool request_jacobian,
       }
 
   }
+
+
+
+
+
+	  //K_initial.print();
+  if (!_is_K_initial_calculated){
+
+	  K_initial = K;
+
+	  _is_K_initial_calculated = true;
+
+	  rho_initial = density[0];
+  }
+  else{
+
+	  K = K_initial;
+
+	  K *= density[0]/rho_initial;
+  }
+
 
   return compute_jacobian;
 }
@@ -681,19 +732,22 @@ void TopOptSystem::attach_body_force (Gradient fptr(const Point& ,const std::str
 
 void TopOptSystem::adjoint_qoi_parameter_sensitivity
 (const QoISet&          qoi_indices,
- const ParameterVector& parameters,
- SensitivityData&       sensitivities)
+ const ParameterVector& ,
+ SensitivityData&       )
 {
 	const unsigned int Nq = libmesh_cast_int<unsigned int>
 	(qoi.size());
 	const unsigned int Np = this->get_mesh().n_active_elem();
 
-	// Get system
+	// Get densities
 	ExplicitSystem& aux_system = this->get_equation_systems().get_system<ExplicitSystem>("Densities");
+
 	// Array to hold the dof indices
 	std::vector<dof_id_type> densities_index;
+
 	// Array to hold the values
 	std::vector<Number> density;
+
 	// Dof Map for the densities system
 	const DofMap& dof_map_densities = aux_system.get_dof_map();
 	// Variable number
@@ -745,14 +799,14 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 	MeshBase::const_element_iterator       el     = this->get_mesh().active_local_elements_begin();
 	const MeshBase::const_element_iterator end_el = this->get_mesh().active_local_elements_end();
 
-    AutoPtr<DiffContext> con = this->build_context();
+    UniquePtr<DiffContext> con = this->build_context();
     FEMContext &_femcontext = libmesh_cast_ref<FEMContext&>(*con);
 
 	std::vector<Number> partialq_partialp(Np);
 
 	// Our vector that accounts for the residual derivative is serial (we need one per element)
 	// but the adjoint vector is parallel, we need to get a serial copy to perform the dot product between them
-	AutoPtr<NumericVector<Number> > local_copy_adjoint_soln = NumericVector<Number>::build(get_equation_systems().comm());
+	UniquePtr<NumericVector<Number> > local_copy_adjoint_soln = NumericVector<Number>::build(get_equation_systems().comm());
 	std::vector<Number> adjoint_soln;
 	adjoint_soln.resize (this->get_adjoint_solution(0).size());
 	// Get copy into adjoint_soln vector
@@ -777,6 +831,7 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 	{
 		const Elem * elem = *el;
 		_femcontext.pre_fe_reinit(*this, elem);
+		_femcontext.elem_fe_reinit();
 		// (partial q / partial p) ~= (q(p+dp)-q(p-dp))/(2*dp)
 		// (partial R / partial p) ~= (rhs(p+dp) - rhs(p-dp))/(2*dp)
 		// Get dof indices
@@ -799,7 +854,7 @@ void TopOptSystem::adjoint_qoi_parameter_sensitivity
 
 				if (this->get_dof_map().has_adjoint_dirichlet_boundaries(i))
 				{
-				AutoPtr<NumericVector<Number> > lift_func =
+				UniquePtr<NumericVector<Number> > lift_func =
 				  this->get_adjoint_solution(i).zero_clone();
 				this->get_dof_map().enforce_constraints_exactly
 				  (*this, lift_func.get(),
@@ -914,7 +969,7 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 	std::vector<std::vector<Number> > partialq_partialp_num;
 	partialq_partialp_num.resize(Nq);
 
-	AutoPtr<DiffContext> con = this->build_context();
+	UniquePtr<DiffContext> con = this->build_context();
     FEMContext &_femcontext = libmesh_cast_ref<FEMContext&>(*con);
     this->get_qoi()->init_context(_femcontext);
 
@@ -929,6 +984,8 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 			const Elem * elem = *el;
 
 			_femcontext.pre_fe_reinit(*this, elem);
+
+			_femcontext.elem_fe_reinit();
 
 			// (partial q / partial p) ~= (q(p+dp)-q(p-dp))/(2*dp)
 			// (partial R / partial p) ~= (rhs(p+dp) - rhs(p-dp))/(2*dp)
@@ -958,7 +1015,7 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 			this->rhs->close();
 
 			// FIXME - this can and should be optimized to avoid the clone()
-			AutoPtr<NumericVector<Number> > partialR_partialp = this->rhs->clone();
+			UniquePtr<NumericVector<Number> > partialR_partialp = this->rhs->clone();
 			*partialR_partialp *= -1;
 
 			Number parameter_forward = old_parameter + delta_p;
@@ -1020,7 +1077,7 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 			// Calculate dQ/dP for this parameter
 			unsigned int indice = 0;
 			Number parameter_derivative;
-			_femcontext.set_elem(elem);
+			_femcontext.pre_fe_reinit(*this, elem);
 			_femcontext.elem_fe_reinit();
 			advanced_qoi[indice]->element_qoi_derivative_parameter(*con,parameter_derivative,density[0]);
 
@@ -1047,13 +1104,13 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 	  const DofMap& dof_map_elasticity = this->get_dof_map();
 
 
-	  unsigned int sys_num = this->number();
+	  //unsigned int sys_num = this->number();
 	  unsigned int u_var = this->variable_number ("u");
 
 	  // First we create a local copy of the entire solution vector
-	  AutoPtr<NumericVector<Number> > local_copy_global_soln = NumericVector<Number>::build(get_equation_systems().comm());
-	  AutoPtr<NumericVector<Number> > local_copy_global_density = NumericVector<Number>::build(get_equation_systems().comm());
-	  AutoPtr<NumericVector<Number> > partialQ_partialU = NumericVector<Number>::build(get_equation_systems().comm());
+	  UniquePtr<NumericVector<Number> > local_copy_global_soln = NumericVector<Number>::build(get_equation_systems().comm());
+	  UniquePtr<NumericVector<Number> > local_copy_global_density = NumericVector<Number>::build(get_equation_systems().comm());
+	  UniquePtr<NumericVector<Number> > partialQ_partialU = NumericVector<Number>::build(get_equation_systems().comm());
 	  // Transfer global solution to a vector
 	  std::vector<Number> global_soln, global_densities;
 	  this->update_global_solution(global_soln);
@@ -1083,7 +1140,7 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 
 
 				const Elem * elem = *el;
-				unsigned int elem_n_dofs = elem->n_dofs(sys_num,u_var);
+				//unsigned int elem_n_dofs = elem->n_dofs(sys_num,u_var);
 				// Grab the dof indices for this element (global degree of freedom)
 				std::vector<dof_id_type> indices;
 				dof_map_elasticity.dof_indices(elem,indices,u_var);
@@ -1106,8 +1163,7 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 					for (; el_qoi != end_el_qoi; el_qoi++){
 						// Initialize context
 
-						_femcontext.set_elem(*el_qoi);
-
+						_femcontext.pre_fe_reinit(*this, *el_qoi);
 						_femcontext.elem_fe_reinit();
 
 
@@ -1157,7 +1213,9 @@ void TopOptSystem::finite_differences_partial_derivatives_check(const QoISet&   
 					for (; el_qoi != end_el_qoi; el_qoi++){
 
 						// Initialize context
-						_femcontext.set_elem(*el_qoi);
+//						_femcontext.set_elem(*el_qoi);
+//						_femcontext.elem_fe_reinit();
+						_femcontext.pre_fe_reinit(*this, *el_qoi);
 						_femcontext.elem_fe_reinit();
 
 						Number qoi_plus_elem = 0.0;
@@ -1347,7 +1405,7 @@ void TopOptSystem::calculate_qoi(const QoISet &qoi_indices)
 
 void TopOptSystem::finite_differences_check(ExplicitSystem * densities,
 											const QoISet & qois,
-											const SensitivityData&       sensitivities,
+											const SensitivityData&   ,
 											const ParameterVector& parameters){
 
 	libmesh_assert(sensitivities_calculated);
@@ -1577,7 +1635,7 @@ void TopOptSystem::update_kernel(){
 	ExplicitSystem& aux_system = this->get_equation_systems().get_system<ExplicitSystem>("Densities");
 
 	// Number of processors
-	unsigned int n_processors = this->n_processors();
+	//unsigned int n_processors = this->n_processors();
 
 	// Serialize the mesh
 	MeshBase & mesh_parallel = this->get_mesh();

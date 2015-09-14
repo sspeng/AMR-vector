@@ -37,8 +37,8 @@ public:
 
 	virtual void element_qoi_derivative_parameter (DiffContext &context, Number & parameter_derivative, Number density_element);
 
-	virtual void element_qoi_for_FD (AutoPtr<NumericVector<Number> > & local_solution,
-											AutoPtr<NumericVector<Number> >& densities_vector,
+	virtual void element_qoi_for_FD (UniquePtr<NumericVector<Number> > & local_solution,
+											UniquePtr<NumericVector<Number> >& densities_vector,
 													const Elem * elem,
 													DiffContext & context, Number & qoi_computed);
 
@@ -55,8 +55,8 @@ public:
 	}
 
 
-	virtual AutoPtr<DifferentiableQoI> clone( ) {
-		return AutoPtr<DifferentiableQoI> ( new VonMisesPnorm(*this) );
+	virtual UniquePtr<DifferentiableQoI> clone( ) {
+		return UniquePtr<DifferentiableQoI> ( new VonMisesPnorm(*this) );
 	}
 
 protected:

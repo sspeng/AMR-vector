@@ -30,8 +30,8 @@ public:
 
   virtual void element_res_derivative(DiffContext &context, TopOptSystem & sys);
 
-  virtual AutoPtr<DifferentiableQoI> clone( ) {
-    return AutoPtr<DifferentiableQoI> ( new ResidualDerivative(*this) );
+  virtual UniquePtr<DifferentiableQoI> clone( ) {
+    return UniquePtr<DifferentiableQoI> ( new ResidualDerivative(*this) );
   }
 
 protected:

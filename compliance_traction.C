@@ -160,8 +160,8 @@ void ComplianceTraction::side_qoi_derivative (DiffContext &context,
 }
 
 
-void ComplianceTraction::element_qoi_for_FD (AutoPtr<NumericVector<Number> > & local_solution,
-											AutoPtr<NumericVector<Number> >& densities_vector,
+void ComplianceTraction::element_qoi_for_FD (UniquePtr<NumericVector<Number> > & local_solution,
+											UniquePtr<NumericVector<Number> >& ,
 													const Elem * elem,
 													DiffContext & context, Number & qoi_computed)
 {
@@ -187,7 +187,7 @@ void ComplianceTraction::element_qoi_for_FD (AutoPtr<NumericVector<Number> > & l
 
 		const unsigned int dim = c.get_dim();
 
-		Number VonMises = 0.;
+		//Number VonMises = 0.;
 
 
 		// Calculate stresses first, we only pick one gauss point, because the gradient is constant
